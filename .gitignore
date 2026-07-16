@@ -1,0 +1,14 @@
+# Compiled binaries
+/gopip
+/gopip.exe
+*.test
+*.out
+
+# Release artifacts
+/dist/
+
+# Editor and OS noise
+.DS_Store
+*.swp
+.idea/
+.vscode/
