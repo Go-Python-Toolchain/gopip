@@ -1,0 +1,552 @@
+// Package resolve chooses a consistent set of package versions for a set of
+// requirements. It is a version-solving resolver in the PubGrub style: it
+// reasons over incompatibilities (sets of package terms that cannot all hold),
+// propagates their consequences as units, and on a conflict derives a new
+// incompatibility and backjumps. Because the universe of versions for a package
+// is finite, constraints are represented as finite version sets.
+package resolve
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"sort"
+
+	"github.com/Go-Python-Toolchain/gopip/internal/pypi"
+	"github.com/Go-Python-Toolchain/gopip/internal/requirement"
+	"github.com/Go-Python-Toolchain/gopip/internal/version"
+)
+
+const (
+	rootPkg     = "$root"
+	rootVersion = "0"
+	// absentVersion is a sentinel in every package's universe standing for "not
+	// selected". It keeps the complement of an any-version dependency non-empty,
+	// so such a dependency still forces the package into the solution, matching
+	// PubGrub's unbounded version space.
+	absentVersion = "\x00absent"
+)
+
+// incompatibility is a set of terms that cannot all be satisfied at once. It has
+// at most one term per package.
+type incompatibility struct {
+	terms  []term
+	kind   string // root, dependency, no-versions, unsupported-python, derived
+	detail string
+}
+
+func (ic *incompatibility) String() string {
+	parts := make([]string, len(ic.terms))
+	for i, t := range ic.terms {
+		parts[i] = t.String()
+	}
+	return "{" + join(parts, ", ") + "}"
+}
+
+// Solution maps a package's canonical name to the chosen version.
+type Solution struct {
+	Packages map[string]*version.Version
+}
+
+// ResolutionError reports that no set of versions satisfies the requirements.
+type ResolutionError struct {
+	Cause *incompatibility
+}
+
+func (e *ResolutionError) Error() string {
+	if e.Cause != nil && e.Cause.detail != "" {
+		return "version resolution failed: " + e.Cause.detail
+	}
+	return "version resolution failed: the requirements are unsatisfiable"
+}
+
+// Resolver holds resolution state for one run.
+type Resolver struct {
+	source    pypi.Source
+	env       requirement.Environment
+	pyVersion *version.Version
+
+	universes   map[string]versionSet
+	versionsAsc map[string][]*version.Version
+	byPackage   map[string][]*incompatibility
+	ps          *partialSolution
+	depsAdded   map[string]bool
+	displayName map[string]string
+}
+
+// Option configures a Resolver.
+type Option func(*Resolver)
+
+// WithEnvironment sets the marker environment used to evaluate dependency
+// markers. The target Python version should be present for requires-python
+// checks.
+func WithEnvironment(env requirement.Environment) Option {
+	return func(r *Resolver) { r.env = env }
+}
+
+// WithPythonVersion sets the target Python version for requires-python filtering.
+func WithPythonVersion(v *version.Version) Option {
+	return func(r *Resolver) { r.pyVersion = v }
+}
+
+// New creates a resolver over the given source.
+func New(source pypi.Source, opts ...Option) *Resolver {
+	r := &Resolver{
+		source:      source,
+		env:         requirement.CurrentEnvironment("3.12"),
+		universes:   map[string]versionSet{},
+		versionsAsc: map[string][]*version.Version{},
+		byPackage:   map[string][]*incompatibility{},
+		ps:          newPartialSolution(),
+		depsAdded:   map[string]bool{},
+		displayName: map[string]string{},
+	}
+	for _, o := range opts {
+		o(r)
+	}
+	if r.pyVersion == nil {
+		if pv, ok := r.env["python_version"]; ok {
+			r.pyVersion, _ = version.Parse(pv)
+		}
+	}
+	return r
+}
+
+// Resolve finds versions for the given root requirements.
+func (r *Resolver) Resolve(ctx context.Context, roots []*requirement.Requirement) (*Solution, error) {
+	r.universes[rootPkg] = newVersionSet(rootVersion)
+
+	for _, req := range roots {
+		if !req.AppliesTo(r.env) {
+			continue
+		}
+		ic, err := r.dependencyIncompatibility(ctx, term{pkg: rootPkg, allowed: newVersionSet(rootVersion)}, "the root project", req)
+		if err != nil {
+			return nil, err
+		}
+		r.addIncompatibility(ic)
+	}
+
+	r.ps.decide(rootPkg, rootVersion, r.universes[rootPkg])
+
+	next := rootPkg
+	for {
+		if err := r.unitPropagation(ctx, next); err != nil {
+			return nil, err
+		}
+		chosen, err := r.decide(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if chosen == "" {
+			break
+		}
+		next = chosen
+	}
+
+	sol := &Solution{Packages: map[string]*version.Version{}}
+	for pkg, verStr := range r.ps.decisions {
+		if pkg == rootPkg {
+			continue
+		}
+		v, err := version.Parse(verStr)
+		if err != nil {
+			return nil, err
+		}
+		sol.Packages[pkg] = v
+	}
+	return sol, nil
+}
+
+func (r *Resolver) addIncompatibility(ic *incompatibility) {
+	seen := map[string]bool{}
+	for _, t := range ic.terms {
+		if seen[t.pkg] {
+			continue
+		}
+		seen[t.pkg] = true
+		r.byPackage[t.pkg] = append(r.byPackage[t.pkg], ic)
+	}
+}
+
+// unitPropagation derives consequences of incompatibilities that mention the
+// changed package, cascading to other packages, until nothing new is derived or
+// a conflict is resolved.
+func (r *Resolver) unitPropagation(ctx context.Context, changed string) error {
+	queue := []string{changed}
+	for len(queue) > 0 {
+		pkg := queue[0]
+		queue = queue[1:]
+
+		ics := r.byPackage[pkg]
+		for i := len(ics) - 1; i >= 0; i-- {
+			ic := ics[i]
+			rel, unit := r.relate(ic)
+			switch rel {
+			case relSatisfied:
+				root, err := r.conflictResolution(ic)
+				if err != nil {
+					return err
+				}
+				_, unit2 := r.relate(root)
+				r.ps.derive(r.negate(unit2), root, r.universes[unit2.pkg])
+				queue = []string{unit2.pkg}
+				ics = r.byPackage[pkg]
+				i = len(ics)
+			case relAlmostSatisfied:
+				r.ps.derive(r.negate(unit), ic, r.universes[unit.pkg])
+				queue = append(queue, unit.pkg)
+			}
+		}
+	}
+	return nil
+}
+
+type icRelation int
+
+const (
+	relInconclusive icRelation = iota
+	relSatisfied
+	relContradicted
+	relAlmostSatisfied
+)
+
+// relate computes how an incompatibility stands against the partial solution.
+func (r *Resolver) relate(ic *incompatibility) (icRelation, term) {
+	inconclusive := 0
+	var unit term
+	for _, t := range ic.terms {
+		u := r.universes[t.pkg]
+		d := r.ps.derivedFor(t.pkg, u)
+		switch {
+		case d.subsetOf(t.allowed):
+			// this term is satisfied
+		case d.disjoint(t.allowed):
+			return relContradicted, term{}
+		default:
+			inconclusive++
+			unit = t
+		}
+	}
+	switch inconclusive {
+	case 0:
+		return relSatisfied, term{}
+	case 1:
+		return relAlmostSatisfied, unit
+	default:
+		return relInconclusive, term{}
+	}
+}
+
+func (r *Resolver) negate(t term) term {
+	return term{pkg: t.pkg, allowed: t.allowed.complement(r.universes[t.pkg])}
+}
+
+// conflictResolution turns a satisfied incompatibility into a new incompatibility
+// that is almost satisfied at an earlier decision level, backjumping the partial
+// solution. It returns an error when the conflict traces back to the root, which
+// means the requirements are unsatisfiable.
+func (r *Resolver) conflictResolution(incompat *incompatibility) (*incompatibility, error) {
+	newlyDerived := false
+	for {
+		if len(incompat.terms) == 0 {
+			return nil, &ResolutionError{Cause: incompat}
+		}
+		if len(incompat.terms) == 1 && incompat.terms[0].pkg == rootPkg {
+			return nil, &ResolutionError{Cause: incompat}
+		}
+
+		var mostRecentTerm term
+		var mostRecentSat assignment
+		mostRecentIdx := -2
+		previousLevel := 1
+		found := false
+
+		for _, t := range incompat.terms {
+			sat, idx := r.ps.satisfier(t, r.universes)
+			if !found || idx > mostRecentIdx {
+				if found {
+					previousLevel = max(previousLevel, mostRecentSat.level)
+				}
+				mostRecentTerm = t
+				mostRecentSat = sat
+				mostRecentIdx = idx
+				found = true
+			} else {
+				previousLevel = max(previousLevel, sat.level)
+			}
+		}
+
+		if mostRecentSat.decision || previousLevel < mostRecentSat.level {
+			if newlyDerived {
+				r.addIncompatibility(incompat)
+			}
+			r.ps.backtrack(previousLevel, r.universes)
+			return incompat, nil
+		}
+
+		// Resolve: merge this incompatibility with the cause of the satisfier,
+		// dropping the terms about the satisfier's package, and add a difference
+		// term when the satisfier only partially covers the term.
+		prior := mostRecentSat.cause
+		merged := map[string]term{}
+		addTerm := func(t term) {
+			if existing, ok := merged[t.pkg]; ok {
+				merged[t.pkg] = term{pkg: t.pkg, allowed: existing.allowed.intersect(t.allowed)}
+			} else {
+				merged[t.pkg] = t
+			}
+		}
+		for _, t := range incompat.terms {
+			if t.pkg != mostRecentTerm.pkg {
+				addTerm(t)
+			}
+		}
+		for _, t := range prior.terms {
+			if t.pkg != mostRecentSat.t.pkg {
+				addTerm(t)
+			}
+		}
+		if !mostRecentSat.t.allowed.subsetOf(mostRecentTerm.allowed) {
+			diff := mostRecentTerm.allowed.complement(mostRecentSat.t.allowed)
+			addTerm(term{pkg: mostRecentTerm.pkg, allowed: diff})
+		}
+
+		terms := make([]term, 0, len(merged))
+		for _, t := range merged {
+			terms = append(terms, t)
+		}
+		incompat = &incompatibility{terms: terms, kind: "derived", detail: prior.detail}
+		newlyDerived = true
+	}
+}
+
+// decide chooses the next package to fix to a concrete version. It returns the
+// package name, or the empty string when every required package is decided.
+func (r *Resolver) decide(ctx context.Context) (string, error) {
+	// Candidate packages are those with a narrowed derived set but no decision.
+	candidates := make([]string, 0)
+	for pkg, allowed := range r.ps.derived {
+		if pkg == rootPkg {
+			continue
+		}
+		if _, decided := r.ps.decisions[pkg]; decided {
+			continue
+		}
+		// A package is only decided when it is forced to be present, meaning the
+		// absent sentinel has been ruled out of its allowed set.
+		if allowed[absentVersion] || allowed.isEmpty() {
+			continue
+		}
+		candidates = append(candidates, pkg)
+	}
+	if len(candidates) == 0 {
+		return "", nil
+	}
+	sort.Strings(candidates)
+
+	// Prefer the package with the fewest allowed versions, breaking ties by name,
+	// which keeps resolution deterministic and tends to fail fast.
+	pick := candidates[0]
+	pickCount := len(r.ps.derived[pick])
+	for _, pkg := range candidates[1:] {
+		if n := len(r.ps.derived[pkg]); n < pickCount {
+			pick, pickCount = pkg, n
+		}
+	}
+
+	allowed := r.ps.derived[pick]
+	if allowed.isEmpty() {
+		// No version works; the incompatibility that emptied it drives the conflict
+		// on the next propagation, so just return it to re-run propagation.
+		return pick, nil
+	}
+
+	chosen := r.bestVersion(pick, allowed)
+	if chosen == nil {
+		r.addIncompatibility(&incompatibility{
+			terms:  []term{{pkg: pick, allowed: allowed.clone()}},
+			kind:   "no-versions",
+			detail: fmt.Sprintf("no version of %s matches the constraints", r.name(pick)),
+		})
+		return pick, nil
+	}
+
+	if err := r.addDependencyIncompatibilities(ctx, pick, chosen); err != nil {
+		return "", err
+	}
+	r.ps.decide(pick, chosen.String(), r.universes[pick])
+	return pick, nil
+}
+
+// bestVersion returns the highest allowed version of a package that also
+// supports the target Python, or nil if none qualifies.
+func (r *Resolver) bestVersion(pkg string, allowed versionSet) *version.Version {
+	versions := r.versionsAsc[pkg]
+	for i := len(versions) - 1; i >= 0; i-- {
+		v := versions[i]
+		if !allowed[v.String()] {
+			continue
+		}
+		ok, err := r.supportsPython(context.Background(), pkg, v)
+		if err != nil || !ok {
+			continue
+		}
+		return v
+	}
+	return nil
+}
+
+// supportsPython reports whether a release's requires-python admits the target.
+func (r *Resolver) supportsPython(ctx context.Context, pkg string, v *version.Version) (bool, error) {
+	if r.pyVersion == nil {
+		return true, nil
+	}
+	info, err := r.release(ctx, pkg, v)
+	if err != nil {
+		return false, err
+	}
+	if info.RequiresPython == "" {
+		return true, nil
+	}
+	spec, err := version.ParseSpecifierSet(info.RequiresPython)
+	if err != nil {
+		return true, nil // tolerate a malformed constraint
+	}
+	return spec.Contains(r.pyVersion, true), nil
+}
+
+// addDependencyIncompatibilities registers the dependencies of a chosen release.
+func (r *Resolver) addDependencyIncompatibilities(ctx context.Context, pkg string, v *version.Version) error {
+	key := pkg + "@" + v.String()
+	if r.depsAdded[key] {
+		return nil
+	}
+	r.depsAdded[key] = true
+
+	info, err := r.release(ctx, pkg, v)
+	if err != nil {
+		return err
+	}
+	self := term{pkg: pkg, allowed: newVersionSet(v.String())}
+	for _, dep := range info.RequiresDist {
+		env := r.envForExtras(nil)
+		if !dep.AppliesTo(env) {
+			continue
+		}
+		ic, err := r.dependencyIncompatibility(ctx, self, r.name(pkg)+" "+v.String(), dep)
+		if err != nil {
+			return err
+		}
+		r.addIncompatibility(ic)
+	}
+	return nil
+}
+
+func (r *Resolver) envForExtras(extras []string) requirement.Environment {
+	if len(extras) == 0 {
+		return r.env
+	}
+	env := requirement.Environment{}
+	for k, v := range r.env {
+		env[k] = v
+	}
+	env["extra"] = extras[0]
+	return env
+}
+
+// dependencyIncompatibility builds the incompatibility "depender depends on dep",
+// fetching the dependency's universe so its allowed set can be computed.
+func (r *Resolver) dependencyIncompatibility(ctx context.Context, depender term, dependerName string, dep *requirement.Requirement) (*incompatibility, error) {
+	depPkg := requirement.CanonicalizeName(dep.Name)
+	if _, err := r.ensureUniverse(ctx, depPkg, dep.Name); err != nil {
+		return nil, err
+	}
+	allowed := r.allowedFor(depPkg, dep)
+	detail := fmt.Sprintf("%s depends on %s%s", dependerName, dep.Name, specText(dep))
+	if allowed.isEmpty() {
+		// No version of the dependency satisfies the constraint, so the depender
+		// itself cannot be selected. The incompatibility is just the depender.
+		return &incompatibility{
+			terms:  []term{depender},
+			kind:   "no-versions",
+			detail: detail + ", which has no matching version",
+		}, nil
+	}
+	return &incompatibility{
+		terms: []term{
+			depender,
+			{pkg: depPkg, allowed: allowed.complement(r.universes[depPkg])},
+		},
+		kind:   "dependency",
+		detail: detail,
+	}, nil
+}
+
+func specText(dep *requirement.Requirement) string {
+	if dep.Specifier == nil {
+		return ""
+	}
+	if s := dep.Specifier.String(); s != "" {
+		return " " + s
+	}
+	return ""
+}
+
+// allowedFor returns the versions of a package that satisfy a requirement.
+func (r *Resolver) allowedFor(pkg string, dep *requirement.Requirement) versionSet {
+	allowed := versionSet{}
+	for _, v := range r.versionsAsc[pkg] {
+		if dep.Specifier == nil || dep.Specifier.Matches(v) {
+			allowed[v.String()] = true
+		}
+	}
+	return allowed
+}
+
+// ensureUniverse fetches and caches a package's available versions.
+func (r *Resolver) ensureUniverse(ctx context.Context, pkg, display string) (versionSet, error) {
+	if u, ok := r.universes[pkg]; ok {
+		return u, nil
+	}
+	r.displayName[pkg] = display
+	versions, err := r.source.Versions(ctx, display)
+	if err != nil {
+		if errors.Is(err, pypi.ErrNotFound) {
+			r.universes[pkg] = versionSet{}
+			r.versionsAsc[pkg] = nil
+			return r.universes[pkg], nil
+		}
+		return nil, err
+	}
+	sort.Slice(versions, func(i, j int) bool { return version.Compare(versions[i], versions[j]) < 0 })
+	u := versionSet{absentVersion: true}
+	for _, v := range versions {
+		u[v.String()] = true
+	}
+	r.universes[pkg] = u
+	r.versionsAsc[pkg] = versions
+	return u, nil
+}
+
+func (r *Resolver) release(ctx context.Context, pkg string, v *version.Version) (*pypi.ReleaseInfo, error) {
+	return r.source.Release(ctx, r.name(pkg), v)
+}
+
+func (r *Resolver) name(pkg string) string {
+	if d, ok := r.displayName[pkg]; ok {
+		return d
+	}
+	return pkg
+}
+
+func join(parts []string, sep string) string {
+	out := ""
+	for i, p := range parts {
+		if i > 0 {
+			out += sep
+		}
+		out += p
+	}
+	return out
+}
