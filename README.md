@@ -11,9 +11,9 @@ gopip is part of the [Go-Python Toolchain](https://github.com/Go-Python-Toolchai
 
 ## Status
 
-Early development. The command line skeleton and build pipeline are in place. The
-version model, requirement parsing, PyPI fetcher, solver, and lockfile are being
-built in order.
+Active development. The version model, requirement parsing, PyPI fetcher,
+resolver, lockfile, and command line are in place and working. Distribution and
+large-scale validation are next.
 
 ## Install
 
@@ -27,6 +27,21 @@ go build -o gopip .
 ```
 
 Requires Go 1.22 or newer.
+
+## Use
+
+```
+gopip resolve requests flask>=2.0     # print pinned name==version lines
+gopip lock -r requirements.txt        # write a deterministic gpt.lock
+gopip explain requests                # print the resolved dependency tree
+gopip install -r requirements.txt     # resolve, then install with pip
+```
+
+Requirements come from arguments or from files given with `-r`. The target
+Python is detected from your interpreter and can be set with `--python`. The
+`install` command resolves to exact versions and hands the installation to pip,
+so packages install exactly as pip would while gopip does the resolving. Anything
+after a bare `--` is passed straight through to pip.
 
 ## Design
 
