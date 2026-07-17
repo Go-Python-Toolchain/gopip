@@ -43,9 +43,14 @@ func (ic *incompatibility) String() string {
 	return "{" + join(parts, ", ") + "}"
 }
 
-// Solution maps a package's canonical name to the chosen version.
+// Solution is the result of resolution: the chosen version of each package, the
+// canonical names required directly by the project, and the dependency edges
+// between resolved packages. Edges and Roots drive the lockfile and the explain
+// tree.
 type Solution struct {
 	Packages map[string]*version.Version
+	Roots    []string
+	Edges    map[string][]string
 }
 
 // ResolutionError reports that no set of versions satisfies the requirements.
@@ -66,12 +71,13 @@ type Resolver struct {
 	env       requirement.Environment
 	pyVersion *version.Version
 
-	universes   map[string]versionSet
-	versionsAsc map[string][]*version.Version
-	byPackage   map[string][]*incompatibility
-	ps          *partialSolution
-	depsAdded   map[string]bool
-	displayName map[string]string
+	universes    map[string]versionSet
+	versionsAsc  map[string][]*version.Version
+	byPackage    map[string][]*incompatibility
+	ps           *partialSolution
+	depsAdded    map[string]bool
+	displayName  map[string]string
+	releaseCache map[string]*pypi.ReleaseInfo
 }
 
 // Option configures a Resolver.
@@ -92,14 +98,15 @@ func WithPythonVersion(v *version.Version) Option {
 // New creates a resolver over the given source.
 func New(source pypi.Source, opts ...Option) *Resolver {
 	r := &Resolver{
-		source:      source,
-		env:         requirement.CurrentEnvironment("3.12"),
-		universes:   map[string]versionSet{},
-		versionsAsc: map[string][]*version.Version{},
-		byPackage:   map[string][]*incompatibility{},
-		ps:          newPartialSolution(),
-		depsAdded:   map[string]bool{},
-		displayName: map[string]string{},
+		source:       source,
+		env:          requirement.CurrentEnvironment("3.12"),
+		universes:    map[string]versionSet{},
+		versionsAsc:  map[string][]*version.Version{},
+		byPackage:    map[string][]*incompatibility{},
+		ps:           newPartialSolution(),
+		depsAdded:    map[string]bool{},
+		displayName:  map[string]string{},
+		releaseCache: map[string]*pypi.ReleaseInfo{},
 	}
 	for _, o := range opts {
 		o(r)
@@ -116,10 +123,12 @@ func New(source pypi.Source, opts ...Option) *Resolver {
 func (r *Resolver) Resolve(ctx context.Context, roots []*requirement.Requirement) (*Solution, error) {
 	r.universes[rootPkg] = newVersionSet(rootVersion)
 
+	var rootNames []string
 	for _, req := range roots {
 		if !req.AppliesTo(r.env) {
 			continue
 		}
+		rootNames = append(rootNames, requirement.CanonicalizeName(req.Name))
 		ic, err := r.dependencyIncompatibility(ctx, term{pkg: rootPkg, allowed: newVersionSet(rootVersion)}, "the root project", req)
 		if err != nil {
 			return nil, err
@@ -144,7 +153,10 @@ func (r *Resolver) Resolve(ctx context.Context, roots []*requirement.Requirement
 		next = chosen
 	}
 
-	sol := &Solution{Packages: map[string]*version.Version{}}
+	sol := &Solution{
+		Packages: map[string]*version.Version{},
+		Edges:    map[string][]string{},
+	}
 	for pkg, verStr := range r.ps.decisions {
 		if pkg == rootPkg {
 			continue
@@ -155,7 +167,60 @@ func (r *Resolver) Resolve(ctx context.Context, roots []*requirement.Requirement
 		}
 		sol.Packages[pkg] = v
 	}
+
+	// Record the roots that made it into the solution, sorted for stability.
+	for _, name := range rootNames {
+		if _, ok := sol.Packages[name]; ok {
+			sol.Roots = append(sol.Roots, name)
+		}
+	}
+	sol.Roots = sortedUnique(sol.Roots)
+
+	// Build dependency edges between resolved packages so the lockfile and the
+	// explain tree can show the graph.
+	if err := r.buildEdges(ctx, sol); err != nil {
+		return nil, err
+	}
 	return sol, nil
+}
+
+// buildEdges fills sol.Edges with, for each resolved package, the resolved
+// packages it depends on under the current environment.
+func (r *Resolver) buildEdges(ctx context.Context, sol *Solution) error {
+	for pkg, v := range sol.Packages {
+		info, err := r.release(ctx, pkg, v)
+		if err != nil {
+			return err
+		}
+		var deps []string
+		for _, dep := range info.RequiresDist {
+			if !dep.AppliesTo(r.env) {
+				continue
+			}
+			depName := requirement.CanonicalizeName(dep.Name)
+			if _, ok := sol.Packages[depName]; ok {
+				deps = append(deps, depName)
+			}
+		}
+		sol.Edges[pkg] = sortedUnique(deps)
+	}
+	return nil
+}
+
+func sortedUnique(in []string) []string {
+	if len(in) == 0 {
+		return nil
+	}
+	seen := map[string]bool{}
+	out := make([]string, 0, len(in))
+	for _, s := range in {
+		if !seen[s] {
+			seen[s] = true
+			out = append(out, s)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 func (r *Resolver) addIncompatibility(ic *incompatibility) {
@@ -530,7 +595,16 @@ func (r *Resolver) ensureUniverse(ctx context.Context, pkg, display string) (ver
 }
 
 func (r *Resolver) release(ctx context.Context, pkg string, v *version.Version) (*pypi.ReleaseInfo, error) {
-	return r.source.Release(ctx, r.name(pkg), v)
+	key := pkg + "@" + v.String()
+	if info, ok := r.releaseCache[key]; ok {
+		return info, nil
+	}
+	info, err := r.source.Release(ctx, r.name(pkg), v)
+	if err != nil {
+		return nil, err
+	}
+	r.releaseCache[key] = info
+	return info, nil
 }
 
 func (r *Resolver) name(pkg string) string {
