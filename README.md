@@ -17,7 +17,15 @@ large-scale validation are next.
 
 ## Install
 
-While pre-release, build from source:
+The easiest way is the Python launcher, which downloads the native binary for
+your platform on first use:
+
+```
+pip install gopip-client
+gopip version
+```
+
+Or build from source:
 
 ```
 git clone https://github.com/Go-Python-Toolchain/gopip
@@ -26,7 +34,14 @@ go build -o gopip .
 ./gopip version
 ```
 
-Requires Go 1.22 or newer.
+Building from source requires Go 1.22 or newer.
+
+In GitHub Actions, install gopip with the bundled action:
+
+```yaml
+- uses: Go-Python-Toolchain/gopip/.github/actions/setup-gopip@v0.1.0
+- run: gopip lock -r requirements.txt
+```
 
 ## Use
 

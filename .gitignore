@@ -7,6 +7,12 @@
 # Release artifacts
 /dist/
 
+# Python client build artifacts
+clients/*/dist/
+clients/*/build/
+**/__pycache__/
+*.egg-info/
+
 # Editor and OS noise
 .DS_Store
 *.swp

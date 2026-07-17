@@ -1,0 +1,32 @@
+name: Setup gopip
+description: Install the gopip dependency resolver and add it to the PATH.
+
+inputs:
+  version:
+    description: The gopip version to install, without a leading v.
+    required: false
+    default: "0.1.0"
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: |
+        set -euo pipefail
+        version="${{ inputs.version }}"
+        os=$(uname -s | tr '[:upper:]' '[:lower:]')
+        arch=$(uname -m)
+        case "$arch" in
+          x86_64|amd64) arch=amd64 ;;
+          arm64|aarch64) arch=arm64 ;;
+          *) echo "unsupported architecture: $arch" >&2; exit 1 ;;
+        esac
+        base="https://github.com/Go-Python-Toolchain/gopip/releases/download/v${version}"
+        archive="gopip_${version}_${os}_${arch}.tar.gz"
+        dest="$HOME/.gopip/bin"
+        mkdir -p "$dest"
+        curl -fsSL "$base/$archive" -o /tmp/gopip.tar.gz
+        tar -xzf /tmp/gopip.tar.gz -C "$dest" gopip
+        chmod +x "$dest/gopip"
+        echo "$dest" >> "$GITHUB_PATH"
+        echo "installed gopip $version to $dest"
