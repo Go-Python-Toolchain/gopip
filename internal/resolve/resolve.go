@@ -184,6 +184,47 @@ func (r *Resolver) Resolve(ctx context.Context, roots []*requirement.Requirement
 	return sol, nil
 }
 
+// Verify checks that a solution actually satisfies the requirements: every
+// applicable root and every applicable dependency of every resolved package is
+// present at a version that meets its constraint. It returns an error describing
+// the first violation, or nil when the solution is valid.
+func Verify(ctx context.Context, source pypi.Source, env requirement.Environment, roots []*requirement.Requirement, sol *Solution) error {
+	for _, req := range roots {
+		if !req.AppliesTo(env) {
+			continue
+		}
+		name := requirement.CanonicalizeName(req.Name)
+		v, ok := sol.Packages[name]
+		if !ok {
+			return fmt.Errorf("root %s is missing from the solution", req.Name)
+		}
+		if req.Specifier != nil && !req.Specifier.Matches(v) {
+			return fmt.Errorf("root %s at %s does not satisfy %s", req.Name, v, req.Specifier)
+		}
+	}
+
+	for name, v := range sol.Packages {
+		info, err := source.Release(ctx, name, v)
+		if err != nil {
+			return fmt.Errorf("verifying %s %s: %w", name, v, err)
+		}
+		for _, dep := range info.RequiresDist {
+			if !dep.AppliesTo(env) {
+				continue
+			}
+			depName := requirement.CanonicalizeName(dep.Name)
+			dv, ok := sol.Packages[depName]
+			if !ok {
+				return fmt.Errorf("%s %s depends on %s, which is missing from the solution", name, v, dep.Name)
+			}
+			if dep.Specifier != nil && !dep.Specifier.Matches(dv) {
+				return fmt.Errorf("%s %s depends on %s%s, but the solution has %s", name, v, dep.Name, dep.Specifier, dv)
+			}
+		}
+	}
+	return nil
+}
+
 // buildEdges fills sol.Edges with, for each resolved package, the resolved
 // packages it depends on under the current environment.
 func (r *Resolver) buildEdges(ctx context.Context, sol *Solution) error {
