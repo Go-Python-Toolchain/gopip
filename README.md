@@ -58,9 +58,17 @@ Python is detected from your interpreter and can be set with `--python`. The
 so packages install exactly as pip would while gopip does the resolving. Anything
 after a bare `--` is passed straight through to pip.
 
+## Documentation
+
+- [Getting started](docs/getting-started.md): install gopip and run your first resolve.
+- [Tutorial](docs/tutorial.md): go from a requirements file to a locked, installed environment.
+- [Resolver design](docs/resolver.md): how gopip chooses versions and detects conflicts.
+- [Validation](docs/validation.md): how the resolver is checked for correctness.
+- [examples/](examples/basic): a small project you can resolve and lock right away.
+
 ## Design
 
-- A pure Go solver with conflict-driven clause learning.
+- A pure Go solver in the PubGrub style, conflict driven and deterministic.
 - Concurrent metadata fetching from the Python Package Index.
 - A deterministic lockfile that is identical across machines and operating systems.
 - Installation delegated to pip, so resolved packages install exactly as expected.
