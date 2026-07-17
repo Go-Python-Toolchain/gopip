@@ -1,0 +1,264 @@
+// Package pypi fetches package metadata from a Python package index using the
+// JSON API. It pools connections, retries transient failures with exponential
+// backoff, and can fetch many releases concurrently. A Source interface lets the
+// resolver run against the network client or an in-memory source in tests.
+package pypi
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"sort"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/Go-Python-Toolchain/gopip/internal/requirement"
+	"github.com/Go-Python-Toolchain/gopip/internal/version"
+)
+
+// DefaultBaseURL is the JSON API root of the public Python Package Index.
+const DefaultBaseURL = "https://pypi.org/pypi"
+
+// ErrNotFound is returned when a package or release does not exist.
+var ErrNotFound = errors.New("not found")
+
+// ReleaseInfo is the metadata gopip needs about one release of a package.
+type ReleaseInfo struct {
+	Name           string
+	Version        *version.Version
+	RequiresPython string
+	RequiresDist   []*requirement.Requirement
+	Yanked         bool
+}
+
+// Source provides package versions and release metadata.
+type Source interface {
+	// Versions returns all available versions of a package, ascending.
+	Versions(ctx context.Context, name string) ([]*version.Version, error)
+	// Release returns the metadata for a specific version.
+	Release(ctx context.Context, name string, v *version.Version) (*ReleaseInfo, error)
+}
+
+// Client fetches metadata from a JSON package index.
+type Client struct {
+	baseURL    string
+	http       *http.Client
+	maxRetries int
+	minBackoff time.Duration
+}
+
+// Option configures a Client.
+type Option func(*Client)
+
+// WithBaseURL sets the JSON API root, for a mirror or a private index.
+func WithBaseURL(u string) Option {
+	return func(c *Client) { c.baseURL = strings.TrimRight(u, "/") }
+}
+
+// WithHTTPClient supplies a custom HTTP client.
+func WithHTTPClient(h *http.Client) Option {
+	return func(c *Client) { c.http = h }
+}
+
+// WithMaxRetries sets how many times a transient failure is retried.
+func WithMaxRetries(n int) Option {
+	return func(c *Client) { c.maxRetries = n }
+}
+
+// WithMinBackoff sets the initial backoff delay, which doubles per retry.
+func WithMinBackoff(d time.Duration) Option {
+	return func(c *Client) { c.minBackoff = d }
+}
+
+// NewClient creates a client with connection pooling suited to fetching many
+// small metadata documents.
+func NewClient(opts ...Option) *Client {
+	transport := &http.Transport{
+		MaxIdleConns:        256,
+		MaxIdleConnsPerHost: 256,
+		IdleConnTimeout:     90 * time.Second,
+		ForceAttemptHTTP2:   true,
+	}
+	c := &Client{
+		baseURL:    DefaultBaseURL,
+		http:       &http.Client{Timeout: 30 * time.Second, Transport: transport},
+		maxRetries: 5,
+		minBackoff: 200 * time.Millisecond,
+	}
+	for _, o := range opts {
+		o(c)
+	}
+	return c
+}
+
+// get fetches a URL, retrying on rate limiting and server errors with
+// exponential backoff. A 404 maps to ErrNotFound.
+func (c *Client) get(ctx context.Context, u string) ([]byte, error) {
+	backoff := c.minBackoff
+	var lastErr error
+
+	for attempt := 0; attempt <= c.maxRetries; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(backoff):
+			}
+			backoff *= 2
+		}
+
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Accept", "application/json")
+		req.Header.Set("User-Agent", "gopip")
+
+		resp, err := c.http.Do(req)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		body, readErr := io.ReadAll(resp.Body)
+		resp.Body.Close()
+
+		switch {
+		case resp.StatusCode == http.StatusOK:
+			if readErr != nil {
+				lastErr = readErr
+				continue
+			}
+			return body, nil
+		case resp.StatusCode == http.StatusNotFound:
+			return nil, ErrNotFound
+		case resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500:
+			lastErr = fmt.Errorf("index returned status %d", resp.StatusCode)
+			if secs := retryAfter(resp.Header.Get("Retry-After")); secs > 0 {
+				backoff = time.Duration(secs) * time.Second
+			}
+		default:
+			return nil, fmt.Errorf("index returned status %d", resp.StatusCode)
+		}
+	}
+	if lastErr == nil {
+		lastErr = errors.New("request failed")
+	}
+	return nil, lastErr
+}
+
+func retryAfter(h string) int {
+	if h == "" {
+		return 0
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(h))
+	if err != nil || n < 0 {
+		return 0
+	}
+	return n
+}
+
+// Versions returns the parseable versions of a package, ascending. Unparseable
+// version strings in the index are skipped rather than failing the whole call.
+func (c *Client) Versions(ctx context.Context, name string) ([]*version.Version, error) {
+	body, err := c.get(ctx, c.baseURL+"/"+url.PathEscape(name)+"/json")
+	if err != nil {
+		return nil, err
+	}
+	var pkg struct {
+		Releases map[string]json.RawMessage `json:"releases"`
+	}
+	if err := json.Unmarshal(body, &pkg); err != nil {
+		return nil, fmt.Errorf("decoding metadata for %q: %w", name, err)
+	}
+
+	versions := make([]*version.Version, 0, len(pkg.Releases))
+	for vs := range pkg.Releases {
+		if v, err := version.Parse(vs); err == nil {
+			versions = append(versions, v)
+		}
+	}
+	sort.Slice(versions, func(i, j int) bool {
+		return version.Compare(versions[i], versions[j]) < 0
+	})
+	return versions, nil
+}
+
+// Release returns the metadata for a specific version.
+func (c *Client) Release(ctx context.Context, name string, v *version.Version) (*ReleaseInfo, error) {
+	body, err := c.get(ctx, c.baseURL+"/"+url.PathEscape(name)+"/"+url.PathEscape(v.String())+"/json")
+	if err != nil {
+		return nil, err
+	}
+	var pkg struct {
+		Info struct {
+			Name           string   `json:"name"`
+			RequiresPython string   `json:"requires_python"`
+			RequiresDist   []string `json:"requires_dist"`
+			Yanked         bool     `json:"yanked"`
+		} `json:"info"`
+	}
+	if err := json.Unmarshal(body, &pkg); err != nil {
+		return nil, fmt.Errorf("decoding release metadata for %q %s: %w", name, v, err)
+	}
+
+	info := &ReleaseInfo{
+		Name:           pkg.Info.Name,
+		Version:        v,
+		RequiresPython: pkg.Info.RequiresPython,
+		Yanked:         pkg.Info.Yanked,
+	}
+	for _, rd := range pkg.Info.RequiresDist {
+		req, err := requirement.Parse(rd)
+		if err != nil {
+			continue // tolerate a malformed dependency rather than failing the release
+		}
+		info.RequiresDist = append(info.RequiresDist, req)
+	}
+	return info, nil
+}
+
+// Ref names a specific release to fetch.
+type Ref struct {
+	Name    string
+	Version *version.Version
+}
+
+// Result pairs a Ref with its fetched metadata or an error.
+type Result struct {
+	Ref  Ref
+	Info *ReleaseInfo
+	Err  error
+}
+
+// FetchReleases fetches many releases concurrently, bounded by concurrency. The
+// results are returned in the same order as refs.
+func (c *Client) FetchReleases(ctx context.Context, refs []Ref, concurrency int) []Result {
+	if concurrency < 1 {
+		concurrency = 1
+	}
+	results := make([]Result, len(refs))
+	sem := make(chan struct{}, concurrency)
+	var wg sync.WaitGroup
+
+	for i, ref := range refs {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(i int, ref Ref) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			info, err := c.Release(ctx, ref.Name, ref.Version)
+			results[i] = Result{Ref: ref, Info: info, Err: err}
+		}(i, ref)
+	}
+	wg.Wait()
+	return results
+}
+
+// Ensure Client satisfies Source.
+var _ Source = (*Client)(nil)
