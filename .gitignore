@@ -18,3 +18,10 @@ clients/*/build/
 *.swp
 .idea/
 .vscode/
+
+# Benchmark workspace: installed competitor tools (uv, pip-tools), their caches,
+# and raw measurement logs. Heavy and reproducible, so never committed. The
+# runnable harness lives in examples/benchmark/ and IS committed; only its work/
+# output is ignored.
+/benchmark/
+examples/benchmark/work/

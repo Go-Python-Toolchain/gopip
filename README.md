@@ -62,9 +62,18 @@ after a bare `--` is passed straight through to pip.
 
 - [Getting started](docs/getting-started.md): install gopip and run your first resolve.
 - [Tutorial](docs/tutorial.md): go from a requirements file to a locked, installed environment.
+- [Architecture](docs/architecture.md): how gopip is put together, from requirements to install.
 - [Resolver design](docs/resolver.md): how gopip chooses versions and detects conflicts.
+- [Lockfile format](docs/lockfile.md): the exact, deterministic format of gpt.lock.
+- [Benchmarks](docs/benchmarks.md): resolve time across real projects, next to uv and pip-tools.
 - [Validation](docs/validation.md): how the resolver is checked for correctness.
-- [examples/](examples/basic): a small project you can resolve and lock right away.
+- [Limitations](docs/limitations.md): what gopip does not do yet, and the trade-offs.
+- [Roadmap](docs/roadmap.md): where gopip is headed.
+
+## Examples
+
+- [basic](examples/basic): a small project you can resolve and lock right away.
+- [benchmark](examples/benchmark): the harness that measures resolve time across real projects and compares against uv and pip-tools.
 
 ## Design
 
