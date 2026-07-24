@@ -51,6 +51,13 @@ type Client struct {
 	http       *http.Client
 	maxRetries int
 	minBackoff time.Duration
+
+	// A package document carries the full metadata of its latest release
+	// alongside the version list. Keeping it means the resolver, which picks the
+	// latest version for most packages, does not have to ask for something the
+	// index already sent.
+	mu     sync.Mutex
+	latest map[string]*ReleaseInfo
 }
 
 // Option configures a Client.
@@ -90,6 +97,7 @@ func NewClient(opts ...Option) *Client {
 		http:       &http.Client{Timeout: 30 * time.Second, Transport: transport},
 		maxRetries: 5,
 		minBackoff: 200 * time.Millisecond,
+		latest:     map[string]*ReleaseInfo{},
 	}
 	for _, o := range opts {
 		o(c)
@@ -163,22 +171,59 @@ func retryAfter(h string) int {
 	return n
 }
 
+// packageDocument is the shape gopip reads out of an index's JSON responses.
+// The same info block appears in a package document, where it describes the
+// latest release, and in a release document, where it describes that release.
+type packageDocument struct {
+	Info struct {
+		Name           string   `json:"name"`
+		Version        string   `json:"version"`
+		RequiresPython string   `json:"requires_python"`
+		RequiresDist   []string `json:"requires_dist"`
+		Yanked         bool     `json:"yanked"`
+	} `json:"info"`
+	Releases map[string]json.RawMessage `json:"releases"`
+}
+
+// releaseInfo turns an info block into release metadata for a known version.
+func (d *packageDocument) releaseInfo(name string, v *version.Version) *ReleaseInfo {
+	if d.Info.Name != "" {
+		name = d.Info.Name
+	}
+	info := &ReleaseInfo{
+		Name:           name,
+		Version:        v,
+		RequiresPython: d.Info.RequiresPython,
+		Yanked:         d.Info.Yanked,
+	}
+	for _, rd := range d.Info.RequiresDist {
+		req, err := requirement.Parse(rd)
+		if err != nil {
+			continue // tolerate a malformed dependency rather than failing the release
+		}
+		info.RequiresDist = append(info.RequiresDist, req)
+	}
+	return info
+}
+
 // Versions returns the parseable versions of a package, ascending. Unparseable
 // version strings in the index are skipped rather than failing the whole call.
+//
+// The response also describes the package's latest release, which is the
+// version the resolver goes on to ask about for most packages, so that metadata
+// is kept rather than fetched a second time.
 func (c *Client) Versions(ctx context.Context, name string) ([]*version.Version, error) {
 	body, err := c.get(ctx, c.baseURL+"/"+url.PathEscape(name)+"/json")
 	if err != nil {
 		return nil, err
 	}
-	var pkg struct {
-		Releases map[string]json.RawMessage `json:"releases"`
-	}
-	if err := json.Unmarshal(body, &pkg); err != nil {
+	var doc packageDocument
+	if err := json.Unmarshal(body, &doc); err != nil {
 		return nil, fmt.Errorf("decoding metadata for %q: %w", name, err)
 	}
 
-	versions := make([]*version.Version, 0, len(pkg.Releases))
-	for vs := range pkg.Releases {
+	versions := make([]*version.Version, 0, len(doc.Releases))
+	for vs := range doc.Releases {
 		if v, err := version.Parse(vs); err == nil {
 			versions = append(versions, v)
 		}
@@ -186,41 +231,42 @@ func (c *Client) Versions(ctx context.Context, name string) ([]*version.Version,
 	sort.Slice(versions, func(i, j int) bool {
 		return version.Compare(versions[i], versions[j]) < 0
 	})
+
+	if latest, err := version.Parse(doc.Info.Version); err == nil {
+		c.mu.Lock()
+		c.latest[requirement.CanonicalizeName(name)] = doc.releaseInfo(name, latest)
+		c.mu.Unlock()
+	}
 	return versions, nil
+}
+
+// cachedLatest returns the release metadata already received alongside a version
+// list, when it describes the version being asked for.
+func (c *Client) cachedLatest(name string, v *version.Version) *ReleaseInfo {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	info, ok := c.latest[requirement.CanonicalizeName(name)]
+	if !ok || info.Version.String() != v.String() {
+		return nil
+	}
+	return info
 }
 
 // Release returns the metadata for a specific version.
 func (c *Client) Release(ctx context.Context, name string, v *version.Version) (*ReleaseInfo, error) {
+	if info := c.cachedLatest(name, v); info != nil {
+		return info, nil
+	}
+
 	body, err := c.get(ctx, c.baseURL+"/"+url.PathEscape(name)+"/"+url.PathEscape(v.String())+"/json")
 	if err != nil {
 		return nil, err
 	}
-	var pkg struct {
-		Info struct {
-			Name           string   `json:"name"`
-			RequiresPython string   `json:"requires_python"`
-			RequiresDist   []string `json:"requires_dist"`
-			Yanked         bool     `json:"yanked"`
-		} `json:"info"`
-	}
-	if err := json.Unmarshal(body, &pkg); err != nil {
+	var doc packageDocument
+	if err := json.Unmarshal(body, &doc); err != nil {
 		return nil, fmt.Errorf("decoding release metadata for %q %s: %w", name, v, err)
 	}
-
-	info := &ReleaseInfo{
-		Name:           pkg.Info.Name,
-		Version:        v,
-		RequiresPython: pkg.Info.RequiresPython,
-		Yanked:         pkg.Info.Yanked,
-	}
-	for _, rd := range pkg.Info.RequiresDist {
-		req, err := requirement.Parse(rd)
-		if err != nil {
-			continue // tolerate a malformed dependency rather than failing the release
-		}
-		info.RequiresDist = append(info.RequiresDist, req)
-	}
-	return info, nil
+	return doc.releaseInfo(name, v), nil
 }
 
 // Ref names a specific release to fetch.

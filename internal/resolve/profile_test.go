@@ -3,8 +3,9 @@ package resolve_test
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"os"
-	"sync/atomic"
+	"sync"
 	"testing"
 	"time"
 
@@ -13,33 +14,45 @@ import (
 	"github.com/Go-Python-Toolchain/gopip/internal/version"
 )
 
-// countingSource wraps a source and measures how many index requests a resolve
-// makes and how long they take. It is the instrument behind the fetch profile:
-// wall time on its own says a resolve is slow, but the split between request
-// count and time per request says why.
-type countingSource struct {
-	inner pypi.Source
+// countingTransport measures a resolve's actual index traffic. Counting at the
+// source interface would be misleading, because a lookup can be answered from
+// metadata the index already sent; only the transport knows what really went
+// over the network. It also records how many requests were in flight at once,
+// which is the difference between fetching in parallel and merely intending to.
+type countingTransport struct {
+	inner http.RoundTripper
 
-	versions   int64
-	releases   int64
-	versionsNs int64
-	releasesNs int64
+	mu       sync.Mutex
+	requests int
+	inFlight int
+	peak     int
+	busy     time.Duration
 }
 
-func (c *countingSource) Versions(ctx context.Context, name string) ([]*version.Version, error) {
-	atomic.AddInt64(&c.versions, 1)
+func (t *countingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	t.mu.Lock()
+	t.requests++
+	t.inFlight++
+	if t.inFlight > t.peak {
+		t.peak = t.inFlight
+	}
+	t.mu.Unlock()
+
 	start := time.Now()
-	v, err := c.inner.Versions(ctx, name)
-	atomic.AddInt64(&c.versionsNs, int64(time.Since(start)))
-	return v, err
+	resp, err := t.inner.RoundTrip(req)
+	elapsed := time.Since(start)
+
+	t.mu.Lock()
+	t.inFlight--
+	t.busy += elapsed
+	t.mu.Unlock()
+	return resp, err
 }
 
-func (c *countingSource) Release(ctx context.Context, name string, v *version.Version) (*pypi.ReleaseInfo, error) {
-	atomic.AddInt64(&c.releases, 1)
-	start := time.Now()
-	info, err := c.inner.Release(ctx, name, v)
-	atomic.AddInt64(&c.releasesNs, int64(time.Since(start)))
-	return info, err
+func (t *countingTransport) snapshot() (requests, peak int, busy time.Duration) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.requests, t.peak, t.busy
 }
 
 // TestFetchProfile measures the index traffic of a real resolve, per benchmark
@@ -47,12 +60,11 @@ func (c *countingSource) Release(ctx context.Context, name string, v *version.Ve
 //
 //	GOPIP_NETWORK_TESTS=1 go test -run TestFetchProfile -v ./internal/resolve/
 //
-// It prints a table of packages, wall time, and the request counts and time
-// spent on each kind of request. This is how the fetch-strategy work is
-// measured: run it before a change and after, and compare the rows.
-//
-// Time spent inside requests can exceed wall time once fetching runs
-// concurrently. That gap is exactly the win, so it is worth reading as a ratio.
+// The request count is the durable figure: unlike wall time it does not move
+// with the network, so it is what a change to the fetch strategy should be
+// judged on. Peak concurrency says how much of the waiting was overlapped, and
+// the ratio of time spent inside requests to wall time says the same thing from
+// the other side.
 func TestFetchProfile(t *testing.T) {
 	if os.Getenv("GOPIP_NETWORK_TESTS") == "" {
 		t.Skip("set GOPIP_NETWORK_TESTS=1 to run tests that reach pypi.org")
@@ -61,14 +73,19 @@ func TestFetchProfile(t *testing.T) {
 	env := fixtureEnvironment()
 	py := version.MustParse(fixturePython)
 
-	fmt.Printf("\n%-14s %9s %9s %9s %9s %9s %9s\n",
-		"project", "packages", "wall", "versions", "vtime", "releases", "rtime")
+	fmt.Printf("\n%-14s %9s %8s %9s %6s %9s\n",
+		"project", "packages", "wall", "requests", "peak", "in requests")
 	for _, name := range benchmarkProjects {
 		roots := loadProject(t, name)
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 
-		src := &countingSource{inner: pypi.NewClient()}
-		r := resolve.New(src, resolve.WithEnvironment(env), resolve.WithPythonVersion(py))
+		counter := &countingTransport{inner: http.DefaultTransport}
+		client := pypi.NewClient(pypi.WithHTTPClient(&http.Client{
+			Timeout:   30 * time.Second,
+			Transport: counter,
+		}))
+
+		r := resolve.New(client, resolve.WithEnvironment(env), resolve.WithPythonVersion(py))
 		start := time.Now()
 		sol, err := r.Resolve(ctx, roots)
 		wall := time.Since(start)
@@ -77,9 +94,8 @@ func TestFetchProfile(t *testing.T) {
 			t.Fatalf("resolving %s: %v", name, err)
 		}
 
-		fmt.Printf("%-14s %9d %8.2fs %9d %8.2fs %9d %8.2fs\n",
-			name, len(sol.Packages), wall.Seconds(),
-			src.versions, time.Duration(src.versionsNs).Seconds(),
-			src.releases, time.Duration(src.releasesNs).Seconds())
+		requests, peak, busy := counter.snapshot()
+		fmt.Printf("%-14s %9d %7.2fs %9d %6d %8.2fs\n",
+			name, len(sol.Packages), wall.Seconds(), requests, peak, busy.Seconds())
 	}
 }

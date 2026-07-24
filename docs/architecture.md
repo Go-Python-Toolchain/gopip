@@ -74,6 +74,34 @@ different base URL, not a different code path.
 The seam is also where the cache lives, which is why the resolver contains no
 caching logic at all.
 
+## How a resolve fetches
+
+A resolve's wall-clock cost is almost entirely round-trips to the index. The
+solver is not the slow part: resolving five real projects against a frozen copy
+of the index takes about thirty milliseconds in total. So the fetch strategy is
+where the time is won or lost, and two things shape it.
+
+**Requests that do not depend on each other are made together.** When a release
+is chosen, everything it depends on is needed no matter what the resolver
+decides next, and those dependencies do not depend on one another. Asking for
+them one at a time turns the width of a dependency layer into latency. They are
+fetched in parallel instead, up to sixteen at once, along with the release
+metadata of the version each constraint is most likely to select. The same
+applies to the root requirements, which are all known before the resolve starts.
+
+Fetching in parallel must not make the answer depend on which response arrives
+first. Nothing is decided while requests are in flight: results are collected
+and then applied in a fixed order, so the resolver walks through exactly the
+state it would have built fetching one at a time. The test suite pins this by
+resolving the benchmark projects to committed lockfiles that must match byte for
+byte.
+
+**Nothing is asked for twice.** A package document carries both the version list
+and the full metadata of the package's latest release, which is the version the
+resolver goes on to select for most packages. Keeping that metadata rather than
+re-requesting it removes close to half of a resolve's requests: what remains is
+one request per resolved package.
+
 ## The metadata cache
 
 A resolve asks the index the same two questions over and over: which versions of

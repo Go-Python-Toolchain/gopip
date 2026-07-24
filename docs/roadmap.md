@@ -6,24 +6,32 @@ is obvious. The current constraints these address are in
 [limitations](limitations.md), and the [benchmarks](benchmarks.md) are the
 scoreboard for the performance items.
 
-## Faster resolves: concurrent fetch
+## Faster resolves
 
-This is the priority. gopip's solver is fast; its wall-clock time on real
-projects is spent waiting on the package index, fetched one request at a time.
+This was the priority, and it is **done**. It had three parts.
 
-- Wire the index client's existing concurrent `FetchReleases` into the
-  resolver's candidate exploration, so metadata for packages the resolver will
-  need is fetched in parallel rather than serially.
+A persistent on-disk metadata cache. gopip keeps what it reads from an index
+under the usual per-platform cache directory, holding version lists briefly and
+individual release metadata for a week, so a warm resolve of the benchmark
+projects does no network work at all and finishes in about ten milliseconds.
+`--refresh`, `--offline`, and `--no-cache` cover the cases where that is not
+what you want, and `gopip cache` inspects and clears it.
 
-Done when a cold resolve of the benchmark projects lands in the same range as
-the fastest peer tools.
+Parallel fetching. Requests that do not depend on each other, the dependencies
+of a chosen release and the root requirements, are made together rather than one
+at a time.
 
-The other half of this, a persistent on-disk metadata cache, is **done**. gopip
-keeps what it reads from an index under the usual per-platform cache directory,
-holding version lists briefly and individual release metadata for a week, so a
-warm resolve of the benchmark projects does no network work and finishes in
-about ten milliseconds. `--refresh`, `--offline`, and `--no-cache` cover the
-cases where that is not what you want, and `gopip cache` inspects and clears it.
+Not asking twice. A package document already carries the metadata of the
+package's latest release, which is the version most packages resolve to, so that
+is kept instead of re-requested. A cold resolve of the benchmark projects now
+makes one request per resolved package, about half what it used to, and runs two
+to six times faster.
+
+What is left here is smaller and less certain to pay off: the remaining
+serialization is the depth of the dependency graph, since a package's
+dependencies are only known once its metadata arrives. Looking ahead
+speculatively would overlap more, at the cost of fetching metadata that may
+never be needed. That trade is worth measuring before it is worth building.
 
 ## Hashes in the lockfile
 

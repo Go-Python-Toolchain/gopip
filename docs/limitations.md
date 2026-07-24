@@ -7,21 +7,23 @@ that focus. Several of these are tracked as future work in the
 [roadmap](roadmap.md), and the [benchmarks](benchmarks.md) show where they
 matter.
 
-## A cold resolve fetches one package at a time
+## A cold resolve is still bounded by the shape of the graph
 
 gopip's solver is fast: it resolves a thousand synthetic graphs in well under a
 second with no network involved, and it resolves five real projects against a
 frozen copy of the index in about thirty milliseconds. Wall-clock time on a real
 resolve is almost entirely time spent waiting on the package index.
 
-A warm resolve no longer pays that, because gopip now keeps a metadata cache
-between runs and a second resolve of the same project does no network work at
-all. A cold resolve still does, and it still asks for one package at a time
-rather than fetching in parallel, so it is the slower half of the comparison
-against a tool like uv. The request count is already minimal, one version list
-and one release per resolved package; what remains is that those requests run in
-sequence. Fixing that is the top item on the [roadmap](roadmap.md), and the
-[benchmarks](benchmarks.md) show where it currently stands.
+Most of that is now dealt with. A warm resolve does no network work at all,
+because gopip keeps a metadata cache between runs. A cold resolve fetches in
+parallel and makes one request per resolved package rather than two.
+
+What remains is the depth of the dependency graph. A package's dependencies are
+only known once its own metadata has arrived, so a long chain of packages that
+each depend on the next is fetched in waves, and no amount of parallelism inside
+a wave removes the waiting between them. In practice this shows up as some
+projects benefiting far more than others from the parallel fetching. The
+[benchmarks](benchmarks.md) record where it currently stands.
 
 ## No hashes in the lockfile
 

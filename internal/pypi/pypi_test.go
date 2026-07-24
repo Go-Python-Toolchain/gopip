@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -171,5 +172,138 @@ func TestContextCancellation(t *testing.T) {
 	c := NewClient(WithBaseURL(srv.URL), WithMinBackoff(50*time.Millisecond))
 	if _, err := c.Versions(ctx, "x"); err == nil {
 		t.Fatal("expected a cancellation error")
+	}
+}
+
+// latestIndex serves a package document that carries its latest release's
+// metadata, the way a real index does, and counts what is asked for.
+func latestIndex(t *testing.T, hits *int32) *httptest.Server {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/sample/json", func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(hits, 1)
+		fmt.Fprint(w, `{"info": {"name": "sample", "version": "2.0", "requires_python": ">=3.9",
+			"requires_dist": ["requests>=2.0"], "yanked": false},
+			"releases": {"1.0": [], "2.0": []}}`)
+	})
+	mux.HandleFunc("/sample/1.0/json", func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(hits, 1)
+		fmt.Fprint(w, `{"info": {"name": "sample", "version": "1.0", "requires_python": ">=3.7",
+			"requires_dist": ["requests>=1.0"], "yanked": true}}`)
+	})
+	return httptest.NewServer(mux)
+}
+
+// A package document already describes its latest release, and that is the
+// version the resolver asks about for most packages. Asking the index again for
+// something it just sent is a wasted round trip.
+func TestClientReusesLatestReleaseMetadata(t *testing.T) {
+	var hits int32
+	srv := latestIndex(t, &hits)
+	defer srv.Close()
+	c := NewClient(WithBaseURL(srv.URL))
+	ctx := context.Background()
+
+	if _, err := c.Versions(ctx, "sample"); err != nil {
+		t.Fatal(err)
+	}
+	if got := atomic.LoadInt32(&hits); got != 1 {
+		t.Fatalf("listing versions took %d requests, want 1", got)
+	}
+
+	info, err := c.Release(ctx, "sample", version.MustParse("2.0"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := atomic.LoadInt32(&hits); got != 1 {
+		t.Errorf("the latest release cost %d more request(s), want 0", got-1)
+	}
+	if info.Name != "sample" || info.Version.String() != "2.0" {
+		t.Errorf("identity = %s %s", info.Name, info.Version)
+	}
+	if info.RequiresPython != ">=3.9" {
+		t.Errorf("requires-python = %q", info.RequiresPython)
+	}
+	if len(info.RequiresDist) != 1 || info.RequiresDist[0].Name != "requests" {
+		t.Fatalf("requires-dist = %v", info.RequiresDist)
+	}
+}
+
+// Only the latest release is described by the package document, so any other
+// version must still be fetched, with its own distinct metadata.
+func TestClientStillFetchesOlderReleases(t *testing.T) {
+	var hits int32
+	srv := latestIndex(t, &hits)
+	defer srv.Close()
+	c := NewClient(WithBaseURL(srv.URL))
+	ctx := context.Background()
+
+	if _, err := c.Versions(ctx, "sample"); err != nil {
+		t.Fatal(err)
+	}
+	info, err := c.Release(ctx, "sample", version.MustParse("1.0"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := atomic.LoadInt32(&hits); got != 2 {
+		t.Fatalf("an older release took %d requests in total, want 2", got)
+	}
+	if info.RequiresPython != ">=3.7" || !info.Yanked {
+		t.Errorf("older release metadata was not used: requires-python %q, yanked %v",
+			info.RequiresPython, info.Yanked)
+	}
+	if len(info.RequiresDist) != 1 || info.RequiresDist[0].String() != "requests>=1.0" {
+		t.Fatalf("requires-dist = %v", info.RequiresDist)
+	}
+}
+
+// TestLatestMetadataMatchesTheReleaseDocument checks the assumption the reuse
+// rests on against the real index: that a package document's info block says the
+// same thing about the latest release as that release's own document. It is
+// guarded because it reaches the network.
+func TestLatestMetadataMatchesTheReleaseDocument(t *testing.T) {
+	if os.Getenv("GOPIP_NETWORK_TESTS") == "" {
+		t.Skip("set GOPIP_NETWORK_TESTS=1 to run tests that reach pypi.org")
+	}
+
+	ctx := context.Background()
+	for _, name := range []string{"requests", "flask", "django", "numpy", "rich", "httpx"} {
+		t.Run(name, func(t *testing.T) {
+			reusing := NewClient()
+			versions, err := reusing.Versions(ctx, name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(versions) == 0 {
+				t.Fatal("no versions")
+			}
+			latest := reusing.cachedLatest(name, versions[len(versions)-1])
+			if latest == nil {
+				// The newest version by ordering is a pre-release the index does not
+				// consider latest, which is a legitimate case, not a failure.
+				t.Skipf("the newest version of %s is not the one the index calls latest", name)
+			}
+
+			// A separate client has nothing stored, so this really does fetch.
+			direct, err := NewClient().Release(ctx, name, latest.Version)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if latest.RequiresPython != direct.RequiresPython {
+				t.Errorf("requires-python: reused %q, fetched %q", latest.RequiresPython, direct.RequiresPython)
+			}
+			if latest.Yanked != direct.Yanked {
+				t.Errorf("yanked: reused %v, fetched %v", latest.Yanked, direct.Yanked)
+			}
+			if len(latest.RequiresDist) != len(direct.RequiresDist) {
+				t.Fatalf("requires-dist: reused %d entries, fetched %d", len(latest.RequiresDist), len(direct.RequiresDist))
+			}
+			for i := range latest.RequiresDist {
+				if latest.RequiresDist[i].String() != direct.RequiresDist[i].String() {
+					t.Errorf("requires-dist %d: reused %q, fetched %q",
+						i, latest.RequiresDist[i], direct.RequiresDist[i])
+				}
+			}
+		})
 	}
 }

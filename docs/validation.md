@@ -73,8 +73,16 @@ Resolution is also exercised against the live index for popular packages
 that passes the same independent verification. This check is guarded by the
 GOPIP_NETWORK_TESTS environment variable so the normal test run stays offline.
 
-Resolving from the live index is currently network bound: the resolver fetches
-release metadata one request at a time as it explores candidates. A concurrent
-prefetch path already exists in the index client and wiring it into candidate
-exploration is a planned performance improvement. It is independent of the
-correctness results above.
+Two further checks cover the parts of fetching that could quietly change an
+answer rather than only the speed of reaching it.
+
+The resolver fetches in parallel, so resolution must not depend on which
+response arrives first. The reference locks above are the guard: they are
+produced by the same concurrent code path and must match byte for byte, and each
+project is resolved three times over to catch any dependence on ordering.
+
+The index client reuses the release metadata that arrives alongside a version
+list instead of requesting it again. That is only sound if a package document
+says the same thing about its latest release as that release's own document
+does. A guarded network test checks exactly that against the live index, field by
+field, for several popular packages.

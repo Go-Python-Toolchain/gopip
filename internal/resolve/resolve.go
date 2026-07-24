@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"sync"
 
 	"github.com/Go-Python-Toolchain/gopip/internal/pypi"
 	"github.com/Go-Python-Toolchain/gopip/internal/requirement"
@@ -25,6 +26,10 @@ const (
 	// so such a dependency still forces the package into the solution, matching
 	// PubGrub's unbounded version space.
 	absentVersion = "\x00absent"
+	// defaultConcurrency bounds how many index requests are in flight at once.
+	// Enough to hide the latency of a wide dependency layer, not so many that a
+	// resolve looks like a burst of traffic to the index.
+	defaultConcurrency = 16
 )
 
 // incompatibility is a set of terms that cannot all be satisfied at once. It has
@@ -78,6 +83,7 @@ type Resolver struct {
 	depsAdded    map[string]bool
 	displayName  map[string]string
 	releaseCache map[string]*pypi.ReleaseInfo
+	concurrency  int
 }
 
 // Option configures a Resolver.
@@ -95,6 +101,16 @@ func WithPythonVersion(v *version.Version) Option {
 	return func(r *Resolver) { r.pyVersion = v }
 }
 
+// WithConcurrency sets how many index requests may be in flight at once. It
+// affects only how quickly a resolution is reached, never what it resolves to.
+func WithConcurrency(n int) Option {
+	return func(r *Resolver) {
+		if n > 0 {
+			r.concurrency = n
+		}
+	}
+}
+
 // New creates a resolver over the given source.
 func New(source pypi.Source, opts ...Option) *Resolver {
 	r := &Resolver{
@@ -107,6 +123,7 @@ func New(source pypi.Source, opts ...Option) *Resolver {
 		depsAdded:    map[string]bool{},
 		displayName:  map[string]string{},
 		releaseCache: map[string]*pypi.ReleaseInfo{},
+		concurrency:  defaultConcurrency,
 	}
 	for _, o := range opts {
 		o(r)
@@ -122,6 +139,18 @@ func New(source pypi.Source, opts ...Option) *Resolver {
 // Resolve finds versions for the given root requirements.
 func (r *Resolver) Resolve(ctx context.Context, roots []*requirement.Requirement) (*Solution, error) {
 	r.universes[rootPkg] = newVersionSet(rootVersion)
+
+	// The roots are known up front and none of them depends on another, so their
+	// metadata is fetched together rather than one at a time.
+	var applicable []*requirement.Requirement
+	for _, req := range roots {
+		if req.AppliesTo(r.env) {
+			applicable = append(applicable, req)
+		}
+	}
+	if err := r.prefetch(ctx, applicable); err != nil {
+		return nil, err
+	}
 
 	var rootNames []string
 	for _, req := range roots {
@@ -534,12 +563,21 @@ func (r *Resolver) addDependencyIncompatibilities(ctx context.Context, pkg strin
 	if err != nil {
 		return err
 	}
-	self := term{pkg: pkg, allowed: newVersionSet(v.String())}
+	// Everything this release depends on is needed regardless of what the
+	// resolver decides next, so it is fetched together before the loop below
+	// starts asking for it one dependency at a time.
+	var deps []*requirement.Requirement
 	for _, dep := range info.RequiresDist {
-		env := r.envForExtras(nil)
-		if !dep.AppliesTo(env) {
-			continue
+		if dep.AppliesTo(r.envForExtras(nil)) {
+			deps = append(deps, dep)
 		}
+	}
+	if err := r.prefetch(ctx, deps); err != nil {
+		return err
+	}
+
+	self := term{pkg: pkg, allowed: newVersionSet(v.String())}
+	for _, dep := range deps {
 		ic, err := r.dependencyIncompatibility(ctx, self, r.name(pkg)+" "+v.String(), dep)
 		if err != nil {
 			return err
@@ -615,24 +653,156 @@ func (r *Resolver) ensureUniverse(ctx context.Context, pkg, display string) (ver
 	if u, ok := r.universes[pkg]; ok {
 		return u, nil
 	}
-	r.displayName[pkg] = display
 	versions, err := r.source.Versions(ctx, display)
 	if err != nil {
 		if errors.Is(err, pypi.ErrNotFound) {
-			r.universes[pkg] = versionSet{}
-			r.versionsAsc[pkg] = nil
+			r.setMissingUniverse(pkg, display)
 			return r.universes[pkg], nil
 		}
 		return nil, err
 	}
+	return r.setUniverse(pkg, display, versions), nil
+}
+
+// setUniverse records a package's available versions as its search space.
+func (r *Resolver) setUniverse(pkg, display string, versions []*version.Version) versionSet {
+	r.displayName[pkg] = display
 	sort.Slice(versions, func(i, j int) bool { return version.Compare(versions[i], versions[j]) < 0 })
+
 	u := versionSet{absentVersion: true}
 	for _, v := range versions {
 		u[v.String()] = true
 	}
 	r.universes[pkg] = u
 	r.versionsAsc[pkg] = versions
-	return u, nil
+	return u
+}
+
+// setMissingUniverse records a package the index does not have, which leaves it
+// with no selectable version at all.
+func (r *Resolver) setMissingUniverse(pkg, display string) {
+	r.displayName[pkg] = display
+	r.universes[pkg] = versionSet{}
+	r.versionsAsc[pkg] = nil
+}
+
+// prefetch fetches the metadata a set of requirements is about to need, in
+// parallel. A resolve's wall-clock cost is almost entirely round-trips to the
+// index, and the requests for a release's dependencies do not depend on each
+// other, so making them one at a time turns a graph's width into latency.
+//
+// Fetching concurrently must not make resolution depend on which response
+// arrives first. Nothing here decides anything: results are collected and then
+// applied in a fixed order, so the resolver sees exactly the state it would have
+// built fetching one at a time.
+func (r *Resolver) prefetch(ctx context.Context, deps []*requirement.Requirement) error {
+	type target struct{ pkg, display string }
+
+	var targets []target
+	seen := map[string]bool{}
+	for _, dep := range deps {
+		pkg := requirement.CanonicalizeName(dep.Name)
+		if _, known := r.universes[pkg]; known || seen[pkg] {
+			continue
+		}
+		seen[pkg] = true
+		targets = append(targets, target{pkg: pkg, display: dep.Name})
+	}
+	if len(targets) < 2 {
+		return nil // nothing to overlap
+	}
+
+	type fetched struct {
+		versions []*version.Version
+		err      error
+	}
+	results := make([]fetched, len(targets))
+	r.inParallel(len(targets), func(i int) {
+		results[i].versions, results[i].err = r.source.Versions(ctx, targets[i].display)
+	})
+
+	for i, t := range targets {
+		switch {
+		case results[i].err == nil:
+			r.setUniverse(t.pkg, t.display, results[i].versions)
+		case errors.Is(results[i].err, pypi.ErrNotFound):
+			r.setMissingUniverse(t.pkg, t.display)
+		default:
+			return results[i].err
+		}
+	}
+
+	r.prefetchReleases(ctx, deps)
+	return nil
+}
+
+// prefetchReleases fetches, in parallel, the release metadata the resolver is
+// most likely to ask for next: the highest version of each dependency that its
+// constraint allows, which is the version the resolver tries first.
+//
+// A failure here is deliberately ignored. This is an optimization, and the real
+// lookup will make the same request and report the failure properly, so a
+// transient error while guessing ahead must never become a resolution error.
+func (r *Resolver) prefetchReleases(ctx context.Context, deps []*requirement.Requirement) {
+	type target struct {
+		pkg string
+		v   *version.Version
+	}
+
+	var targets []target
+	seen := map[string]bool{}
+	for _, dep := range deps {
+		pkg := requirement.CanonicalizeName(dep.Name)
+		allowed := r.allowedFor(pkg, dep)
+		versions := r.versionsAsc[pkg]
+		for i := len(versions) - 1; i >= 0; i-- {
+			v := versions[i]
+			if !allowed[v.String()] {
+				continue
+			}
+			key := pkg + "@" + v.String()
+			if _, cached := r.releaseCache[key]; !cached && !seen[key] {
+				seen[key] = true
+				targets = append(targets, target{pkg: pkg, v: v})
+			}
+			break
+		}
+	}
+	if len(targets) < 2 {
+		return
+	}
+
+	infos := make([]*pypi.ReleaseInfo, len(targets))
+	r.inParallel(len(targets), func(i int) {
+		info, err := r.source.Release(ctx, r.name(targets[i].pkg), targets[i].v)
+		if err == nil {
+			infos[i] = info
+		}
+	})
+
+	for i, t := range targets {
+		if infos[i] != nil {
+			r.releaseCache[t.pkg+"@"+t.v.String()] = infos[i]
+		}
+	}
+}
+
+// inParallel runs work for each index below n, with at most concurrency of them
+// in flight. The work function must not touch resolver state; callers collect
+// into a preallocated slice and apply the results afterwards.
+func (r *Resolver) inParallel(n int, work func(i int)) {
+	sem := make(chan struct{}, r.concurrency)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(i int) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			work(i)
+		}(i)
+	}
+	wg.Wait()
 }
 
 func (r *Resolver) release(ctx context.Context, pkg string, v *version.Version) (*pypi.ReleaseInfo, error) {
