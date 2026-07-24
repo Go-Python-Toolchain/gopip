@@ -11,9 +11,11 @@ gopip is part of the [Go-Python Toolchain](https://github.com/Go-Python-Toolchai
 
 ## Status
 
-Active development. The version model, requirement parsing, PyPI fetcher,
-resolver, lockfile, and command line are in place and working. Distribution and
-large-scale validation are next.
+Released and in active development. The resolver is validated over a thousand
+random dependency graphs and pinned against a frozen capture of the real package
+index, and resolves the same package sets as uv and pip-tools. A repeat resolve
+of a real project takes about ten milliseconds; see the
+[benchmarks](docs/benchmarks.md).
 
 ## Install
 
@@ -50,13 +52,23 @@ gopip resolve requests flask>=2.0     # print pinned name==version lines
 gopip lock -r requirements.txt        # write a deterministic gpt.lock
 gopip explain requests                # print the resolved dependency tree
 gopip install -r requirements.txt     # resolve, then install with pip
+gopip cache info                      # show what index metadata is cached
 ```
 
-Requirements come from arguments or from files given with `-r`. The target
-Python is detected from your interpreter and can be set with `--python`. The
-`install` command resolves to exact versions and hands the installation to pip,
-so packages install exactly as pip would while gopip does the resolving. Anything
-after a bare `--` is passed straight through to pip.
+Requirements come from arguments or from files given with `-r`, including
+extras such as `flask[async]`. The target Python is detected from your
+interpreter and can be set with `--python`. The `install` command resolves to
+exact versions and hands the installation to pip, so packages install exactly as
+pip would while gopip does the resolving. Anything after a bare `--` is passed
+straight through to pip.
+
+gopip caches what it reads from the index, so a second resolve does no network
+work. `--refresh` fetches again, `--offline` uses only what is cached and refuses
+to reach the network, and `--no-cache` leaves the cache out.
+
+`gpt.lock` records the digest of every artifact published for each pinned
+version, and `gopip install --require-hashes` verifies each download against
+them.
 
 ## Documentation
 
@@ -77,9 +89,12 @@ after a bare `--` is passed straight through to pip.
 
 ## Design
 
-- A pure Go solver in the PubGrub style, conflict driven and deterministic.
-- Concurrent metadata fetching from the Python Package Index.
-- A deterministic lockfile that is identical across machines and operating systems.
+- A pure Go solver in the PubGrub style, conflict driven and deterministic, that
+  explains a failure by naming the requirements that conflict.
+- Concurrent metadata fetching from the Python Package Index, with an on-disk
+  cache so a repeat resolve does no network work.
+- A deterministic lockfile, identical across machines and operating systems,
+  carrying artifact digests for verified installs.
 - Installation delegated to pip, so resolved packages install exactly as expected.
 
 ## License
