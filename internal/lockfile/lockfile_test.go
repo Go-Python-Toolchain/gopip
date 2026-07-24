@@ -146,3 +146,71 @@ func TestExplainHandlesCycle(t *testing.T) {
 		t.Fatalf("expected a cycle marker:\n%s", out)
 	}
 }
+
+// A lock records the extras a resolution selected, so what it pins is the same
+// set that was resolved rather than the packages on their own.
+func TestBuildRecordsExtras(t *testing.T) {
+	sol := &resolve.Solution{
+		Packages: map[string]*version.Version{
+			"flask":   version.MustParse("3.1.3"),
+			"asgiref": version.MustParse("3.12.1"),
+		},
+		Roots:  []string{"flask"},
+		Edges:  map[string][]string{"flask": {"asgiref"}},
+		Extras: map[string][]string{"flask": {"async"}},
+	}
+
+	lock := Build(sol)
+	var flask, asgiref *Package
+	for i := range lock.Packages {
+		switch lock.Packages[i].Name {
+		case "flask":
+			flask = &lock.Packages[i]
+		case "asgiref":
+			asgiref = &lock.Packages[i]
+		}
+	}
+	if flask == nil || asgiref == nil {
+		t.Fatalf("lock is missing packages: %+v", lock.Packages)
+	}
+	if len(flask.Extras) != 1 || flask.Extras[0] != "async" {
+		t.Errorf("flask extras = %v, want [async]", flask.Extras)
+	}
+	if asgiref.Extras != nil {
+		t.Errorf("asgiref carries extras %v, want none", asgiref.Extras)
+	}
+}
+
+// A resolution with no extras must serialize exactly as it did before extras
+// existed, so upgrading gopip does not rewrite every lockfile in every project.
+func TestLockWithoutExtrasIsUnchanged(t *testing.T) {
+	sol := &resolve.Solution{
+		Packages: map[string]*version.Version{"flask": version.MustParse("3.1.3")},
+		Roots:    []string{"flask"},
+		Edges:    map[string][]string{},
+		Extras:   map[string][]string{},
+	}
+
+	data, err := Build(sol).Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "extras") {
+		t.Fatalf("a lock with no extras mentions them:\n%s", data)
+	}
+}
+
+// An older lock has no extras field at all and must still read cleanly.
+func TestParseAcceptsALockWithoutExtras(t *testing.T) {
+	older := []byte(`{"version":1,"roots":["flask"],"packages":[{"name":"flask","version":"3.1.3"}]}`)
+	lock, err := Parse(older)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(lock.Packages) != 1 || lock.Packages[0].Name != "flask" {
+		t.Fatalf("packages = %+v", lock.Packages)
+	}
+	if lock.Packages[0].Extras != nil {
+		t.Errorf("extras = %v, want none", lock.Packages[0].Extras)
+	}
+}

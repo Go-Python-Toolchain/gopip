@@ -203,7 +203,9 @@ func resolveInputs(ctx context.Context, o resolveOptions) (*resolve.Solution, er
 }
 
 // pinnedRequirements returns the resolved packages as sorted name==version
-// strings, the form pip consumes.
+// strings, the form pip consumes. A package whose extras were selected is
+// written with them, as name[extra]==version, so pip installs the same set gopip
+// resolved rather than the package on its own.
 func pinnedRequirements(sol *resolve.Solution) []string {
 	names := make([]string, 0, len(sol.Packages))
 	for n := range sol.Packages {
@@ -213,7 +215,13 @@ func pinnedRequirements(sol *resolve.Solution) []string {
 
 	out := make([]string, 0, len(names))
 	for _, n := range names {
-		out = append(out, fmt.Sprintf("%s==%s", n, sol.Packages[n].String()))
+		name := n
+		if extras := sol.Extras[n]; len(extras) > 0 {
+			sorted := append([]string(nil), extras...)
+			sort.Strings(sorted)
+			name += "[" + strings.Join(sorted, ",") + "]"
+		}
+		out = append(out, fmt.Sprintf("%s==%s", name, sol.Packages[n].String()))
 	}
 	return out
 }

@@ -61,7 +61,33 @@ Each entry in `packages` is:
 | --- | --- | --- |
 | `name` | string | The package's normalized name. |
 | `version` | string | The exact resolved version, a PEP 440 version. |
+| `extras` | array of strings, optional | The package's optional features the resolution selected, normalized and sorted. Omitted when none were, so a lock for a project that uses no extras is unaffected by this field existing. |
 | `dependencies` | array of strings, optional | The names of the resolved packages this one depends on, sorted. Omitted when empty. |
+
+A package with extras appears once, with the extras it was resolved with:
+
+```json
+{
+  "name": "flask",
+  "version": "3.1.3",
+  "extras": [
+    "async"
+  ],
+  "dependencies": [
+    "asgiref",
+    "blinker",
+    "click",
+    "itsdangerous",
+    "jinja2",
+    "markupsafe",
+    "werkzeug"
+  ]
+}
+```
+
+The extra's own requirements are entries in `packages` like any other, and they
+appear in the package's `dependencies`, so the graph the file records is the one
+that will actually be installed.
 
 The `dependencies` lists reference other entries in `packages` by name, so the
 file records the full resolved graph, not just a flat list of pins. `explain`

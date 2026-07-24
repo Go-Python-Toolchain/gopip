@@ -38,6 +38,16 @@ It must not have been yanked, unless a requirement named it exactly. Yanking is 
 
 Its metadata must be readable. If the index lists a version but has no metadata for it, the release is not really there and the resolver moves down to the next one. Anything else, a connection that drops or an index that errors, stops the resolve. The distinction matters more than it looks: not knowing whether a version is usable is not the same as knowing it is not, and treating a network failure as a reason to skip would quietly produce a lockfile that pins an older version and looks like a deliberate choice.
 
+## Extras
+
+`flask[async]` means flask plus the dependencies flask publishes under its `async` extra. In package metadata those dependencies are ordinary requirements guarded by a marker on `extra`, so which of them apply depends on which extra is being resolved.
+
+gopip treats each extra as a package in its own right, named `flask[async]`. It offers the same versions flask does, and selecting it at a version pulls in flask at that same version plus whatever the extra requires. Every part of the algorithm then handles extras without knowing they exist: an extra is decided, backtracked, and learned from exactly like any other package. Package names cannot contain a bracket, so the naming is unambiguous.
+
+The obvious alternative is to track a set of active extras per package and widen its dependencies as extras are requested. That does not survive backtracking. Dependency incompatibilities are permanent facts, which is what lets the solver learn from a dead end instead of re-exploring it, so once "flask 3.0 requires asgiref" is recorded because something asked for `flask[async]`, it keeps forcing asgiref even after the package that asked for the extra has been backjumped out of the solution. Modelling the extra as its own package keeps the fact conditional on the extra actually being selected, which is the only form in which it is true. The test suite constructs exactly that backtrack and checks the extra's dependency is gone.
+
+Extras are normalized the same way package names are, so `flask[Async]` and `flask[async]` are one extra. An extra a package does not publish resolves to the plain package, which is what pip does. The selected extras are recorded in `gpt.lock` and handed to pip as `flask[async]==3.1.3` at install time, so what gets installed is the set that was resolved.
+
 ## Cancellation
 
 Every lookup a resolve makes takes the caller's context, including the ones inside version selection, so cancelling a resolve or setting a deadline stops it promptly rather than at the next convenient point.

@@ -56,6 +56,9 @@ type Solution struct {
 	Packages map[string]*version.Version
 	Roots    []string
 	Edges    map[string][]string
+	// Extras records, per package, the extras the resolution selected, sorted.
+	// A package with no extras selected has no entry.
+	Extras map[string][]string
 }
 
 // ResolutionError reports that no set of versions satisfies the requirements.
@@ -163,11 +166,13 @@ func (r *Resolver) Resolve(ctx context.Context, roots []*requirement.Requirement
 			continue
 		}
 		rootNames = append(rootNames, requirement.CanonicalizeName(req.Name))
-		ic, err := r.dependencyIncompatibility(ctx, term{pkg: rootPkg, allowed: newVersionSet(rootVersion)}, "the root project", req)
+		ics, err := r.dependencyIncompatibilities(ctx, term{pkg: rootPkg, allowed: newVersionSet(rootVersion)}, "the root project", req)
 		if err != nil {
 			return nil, err
 		}
-		r.addIncompatibility(ic)
+		for _, ic := range ics {
+			r.addIncompatibility(ic)
+		}
 	}
 
 	r.ps.decide(rootPkg, rootVersion, r.universes[rootPkg])
@@ -190,7 +195,11 @@ func (r *Resolver) Resolve(ctx context.Context, roots []*requirement.Requirement
 	sol := &Solution{
 		Packages: map[string]*version.Version{},
 		Edges:    map[string][]string{},
+		Extras:   map[string][]string{},
 	}
+	// A decision on an extra is not a package to install; it says that an extra of
+	// a package was selected, and the base package carries its own decision at the
+	// same version. So extras are folded into the package they belong to.
 	for pkg, verStr := range r.ps.decisions {
 		if pkg == rootPkg {
 			continue
@@ -199,7 +208,14 @@ func (r *Resolver) Resolve(ctx context.Context, roots []*requirement.Requirement
 		if err != nil {
 			return nil, err
 		}
+		if base, extra := splitPkg(pkg); extra != "" {
+			sol.Extras[base] = append(sol.Extras[base], extra)
+			continue
+		}
 		sol.Packages[pkg] = v
+	}
+	for pkg, extras := range sol.Extras {
+		sol.Extras[pkg] = sortedUnique(extras)
 	}
 
 	// Record the roots that made it into the solution, sorted for stability.
@@ -235,6 +251,9 @@ func Verify(ctx context.Context, source pypi.Source, env requirement.Environment
 		if req.Specifier != nil && !req.Specifier.Matches(v) {
 			return fmt.Errorf("root %s at %s does not satisfy %s", req.Name, v, req.Specifier)
 		}
+		if err := verifyExtras(sol, "the root project", nil, req, v); err != nil {
+			return err
+		}
 	}
 
 	for name, v := range sol.Packages {
@@ -242,21 +261,67 @@ func Verify(ctx context.Context, source pypi.Source, env requirement.Environment
 		if err != nil {
 			return fmt.Errorf("verifying %s %s: %w", name, v, err)
 		}
-		for _, dep := range info.RequiresDist {
-			if !dep.AppliesTo(env) {
-				continue
-			}
-			depName := requirement.CanonicalizeName(dep.Name)
-			dv, ok := sol.Packages[depName]
-			if !ok {
-				return fmt.Errorf("%s %s depends on %s, which is missing from the solution", name, v, dep.Name)
-			}
-			if dep.Specifier != nil && !dep.Specifier.Matches(dv) {
-				return fmt.Errorf("%s %s depends on %s%s, but the solution has %s", name, v, dep.Name, dep.Specifier, dv)
+		// A package's requirements are the ones that apply plainly plus the ones
+		// each selected extra brings in, so both are checked.
+		for _, envForCheck := range environmentsFor(env, sol.Extras[name]) {
+			for _, dep := range info.RequiresDist {
+				if !dep.AppliesTo(envForCheck) {
+					continue
+				}
+				depName := requirement.CanonicalizeName(dep.Name)
+				dv, ok := sol.Packages[depName]
+				if !ok {
+					return fmt.Errorf("%s %s depends on %s, which is missing from the solution", name, v, dep.Name)
+				}
+				if dep.Specifier != nil && !dep.Specifier.Matches(dv) {
+					return fmt.Errorf("%s %s depends on %s%s, but the solution has %s", name, v, dep.Name, dep.Specifier, dv)
+				}
+				if err := verifyExtras(sol, name, v, dep, dv); err != nil {
+					return err
+				}
 			}
 		}
 	}
 	return nil
+}
+
+// verifyExtras checks that a requirement asking for extras of a package really
+// did select them, which is what catches an extra being silently dropped. The
+// depender is named for the error message; a nil version means the requirement
+// came from the project itself rather than from another package.
+func verifyExtras(sol *Solution, dependerName string, dependerVersion *version.Version, dep *requirement.Requirement, dv *version.Version) error {
+	depName := requirement.CanonicalizeName(dep.Name)
+	selected := map[string]bool{}
+	for _, e := range sol.Extras[depName] {
+		selected[e] = true
+	}
+	for _, want := range extrasOf(dep) {
+		if selected[want] {
+			continue
+		}
+		depender := dependerName
+		if dependerVersion != nil {
+			depender += " " + dependerVersion.String()
+		}
+		return fmt.Errorf("%s requires %s[%s], but the solution selected %s %s without that extra",
+			depender, dep.Name, want, dep.Name, dv)
+	}
+	return nil
+}
+
+// environmentsFor returns the marker environments a package's dependencies must
+// be read under: the plain one, and one per selected extra.
+func environmentsFor(env requirement.Environment, extras []string) []requirement.Environment {
+	out := []requirement.Environment{env}
+	for _, extra := range extras {
+		withExtra := make(requirement.Environment, len(env))
+		for k, val := range env {
+			withExtra[k] = val
+		}
+		withExtra["extra"] = extra
+		out = append(out, withExtra)
+	}
+	return out
 }
 
 // buildEdges fills sol.Edges with, for each resolved package, the resolved
@@ -268,13 +333,15 @@ func (r *Resolver) buildEdges(ctx context.Context, sol *Solution) error {
 			return err
 		}
 		var deps []string
-		for _, dep := range info.RequiresDist {
-			if !dep.AppliesTo(r.env) {
-				continue
-			}
-			depName := requirement.CanonicalizeName(dep.Name)
-			if _, ok := sol.Packages[depName]; ok {
-				deps = append(deps, depName)
+		for _, env := range environmentsFor(r.env, sol.Extras[pkg]) {
+			for _, dep := range info.RequiresDist {
+				if !dep.AppliesTo(env) {
+					continue
+				}
+				depName := requirement.CanonicalizeName(dep.Name)
+				if _, ok := sol.Packages[depName]; ok {
+					deps = append(deps, depName)
+				}
 			}
 		}
 		sol.Edges[pkg] = sortedUnique(deps)
@@ -591,6 +658,10 @@ func (r *Resolver) isPinned(pkg string, v *version.Version) bool {
 }
 
 // addDependencyIncompatibilities registers the dependencies of a chosen release.
+//
+// For a package standing for an extra, the dependencies are the ones that
+// release publishes under that extra, plus the base package at the same version:
+// selecting flask[async] means selecting flask.
 func (r *Resolver) addDependencyIncompatibilities(ctx context.Context, pkg string, v *version.Version) error {
 	key := pkg + "@" + v.String()
 	if r.depsAdded[key] {
@@ -602,12 +673,32 @@ func (r *Resolver) addDependencyIncompatibilities(ctx context.Context, pkg strin
 	if err != nil {
 		return err
 	}
+
+	base, extra := splitPkg(pkg)
+	self := term{pkg: pkg, allowed: newVersionSet(v.String())}
+	label := r.label(pkg) + " " + v.String()
+
+	if extra != "" {
+		// An extra is only meaningful alongside the package it belongs to, at the
+		// same version. Nothing else ties the two together, so this is what stops
+		// flask[async] 3.0 coexisting with flask 2.0.
+		r.addIncompatibility(&incompatibility{
+			terms: []term{
+				self,
+				{pkg: base, allowed: newVersionSet(v.String()).complement(r.universes[base])},
+			},
+			kind:   "dependency",
+			detail: label + " depends on " + r.name(base) + " " + v.String(),
+		})
+	}
+
 	// Everything this release depends on is needed regardless of what the
 	// resolver decides next, so it is fetched together before the loop below
 	// starts asking for it one dependency at a time.
+	env := r.envForExtra(extra)
 	var deps []*requirement.Requirement
 	for _, dep := range info.RequiresDist {
-		if dep.AppliesTo(r.envForExtras(nil)) {
+		if dep.AppliesTo(env) {
 			deps = append(deps, dep)
 		}
 	}
@@ -615,56 +706,80 @@ func (r *Resolver) addDependencyIncompatibilities(ctx context.Context, pkg strin
 		return err
 	}
 
-	self := term{pkg: pkg, allowed: newVersionSet(v.String())}
 	for _, dep := range deps {
-		ic, err := r.dependencyIncompatibility(ctx, self, r.name(pkg)+" "+v.String(), dep)
+		ics, err := r.dependencyIncompatibilities(ctx, self, label, dep)
 		if err != nil {
 			return err
 		}
-		r.addIncompatibility(ic)
+		for _, ic := range ics {
+			r.addIncompatibility(ic)
+		}
 	}
 	return nil
 }
 
-func (r *Resolver) envForExtras(extras []string) requirement.Environment {
-	if len(extras) == 0 {
+// envForExtra returns the marker environment for evaluating a release's
+// dependencies. Dependencies that belong to an extra are guarded by a marker on
+// `extra`, so which of them apply depends entirely on this value.
+func (r *Resolver) envForExtra(extra string) requirement.Environment {
+	if extra == "" {
 		return r.env
 	}
-	env := requirement.Environment{}
+	env := make(requirement.Environment, len(r.env))
 	for k, v := range r.env {
 		env[k] = v
 	}
-	env["extra"] = extras[0]
+	env["extra"] = extra
 	return env
 }
 
-// dependencyIncompatibility builds the incompatibility "depender depends on dep",
-// fetching the dependency's universe so its allowed set can be computed.
-func (r *Resolver) dependencyIncompatibility(ctx context.Context, depender term, dependerName string, dep *requirement.Requirement) (*incompatibility, error) {
-	depPkg := requirement.CanonicalizeName(dep.Name)
-	if _, err := r.ensureUniverse(ctx, depPkg, dep.Name); err != nil {
-		return nil, err
+// dependencyIncompatibilities builds the incompatibilities for "depender depends
+// on dep", fetching the dependency's universe so its allowed set can be
+// computed.
+//
+// A requirement naming extras, such as `flask[async,dotenv]`, produces one
+// incompatibility per extra rather than one for the package. Each extra package
+// pulls in the base package at the same version itself, so the base is
+// constrained without needing its own incompatibility here.
+func (r *Resolver) dependencyIncompatibilities(ctx context.Context, depender term, dependerName string, dep *requirement.Requirement) ([]*incompatibility, error) {
+	base := requirement.CanonicalizeName(dep.Name)
+
+	targets := []string{base}
+	if extras := extrasOf(dep); len(extras) > 0 {
+		targets = targets[:0]
+		for _, extra := range extras {
+			targets = append(targets, extraPkg(base, extra))
+		}
 	}
-	r.notePins(depPkg, dep)
-	allowed := r.allowedFor(depPkg, dep)
-	detail := fmt.Sprintf("%s depends on %s%s", dependerName, dep.Name, specText(dep))
-	if allowed.isEmpty() {
-		// No version of the dependency satisfies the constraint, so the depender
-		// itself cannot be selected. The incompatibility is just the depender.
-		return &incompatibility{
-			terms:  []term{depender},
-			kind:   "no-versions",
-			detail: detail + ", which has no matching version",
-		}, nil
+
+	out := make([]*incompatibility, 0, len(targets))
+	for _, depPkg := range targets {
+		if _, err := r.ensureUniverse(ctx, depPkg, dep.Name); err != nil {
+			return nil, err
+		}
+		r.notePins(depPkg, dep)
+
+		allowed := r.allowedFor(depPkg, dep)
+		detail := fmt.Sprintf("%s depends on %s%s", dependerName, r.label(depPkg), specText(dep))
+		if allowed.isEmpty() {
+			// No version of the dependency satisfies the constraint, so the depender
+			// itself cannot be selected. The incompatibility is just the depender.
+			return []*incompatibility{{
+				terms:  []term{depender},
+				kind:   "no-versions",
+				detail: detail + ", which has no matching version",
+			}}, nil
+		}
+		out = append(out, &incompatibility{
+			terms: []term{
+				depender,
+				{pkg: depPkg, allowed: allowed.complement(r.universes[depPkg])},
+			},
+			kind:   "dependency",
+			detail: detail,
+		})
 	}
-	return &incompatibility{
-		terms: []term{
-			depender,
-			{pkg: depPkg, allowed: allowed.complement(r.universes[depPkg])},
-		},
-		kind:   "dependency",
-		detail: detail,
-	}, nil
+	return out, nil
 }
 
 func specText(dep *requirement.Requirement) string {
@@ -693,6 +808,19 @@ func (r *Resolver) ensureUniverse(ctx context.Context, pkg, display string) (ver
 	if u, ok := r.universes[pkg]; ok {
 		return u, nil
 	}
+
+	// An extra offers exactly the versions its package does, so it shares the
+	// base package's search space rather than asking the index again.
+	if base, extra := splitPkg(pkg); extra != "" {
+		if _, err := r.ensureUniverse(ctx, base, display); err != nil {
+			return nil, err
+		}
+		r.displayName[pkg] = display
+		r.universes[pkg] = r.universes[base].clone()
+		r.versionsAsc[pkg] = r.versionsAsc[base]
+		return r.universes[pkg], nil
+	}
+
 	versions, err := r.source.Versions(ctx, display)
 	if err != nil {
 		if errors.Is(err, pypi.ErrNotFound) {
@@ -846,6 +974,9 @@ func (r *Resolver) inParallel(n int, work func(i int)) {
 }
 
 func (r *Resolver) release(ctx context.Context, pkg string, v *version.Version) (*pypi.ReleaseInfo, error) {
+	// An extra has no metadata of its own; it is a view of its package's release.
+	pkg, _ = splitPkg(pkg)
+
 	key := pkg + "@" + v.String()
 	if info, ok := r.releaseCache[key]; ok {
 		return info, nil
@@ -863,6 +994,15 @@ func (r *Resolver) name(pkg string) string {
 		return d
 	}
 	return pkg
+}
+
+// label renders a package the way a user wrote it, including its extra.
+func (r *Resolver) label(pkg string) string {
+	base, extra := splitPkg(pkg)
+	if extra == "" {
+		return r.name(base)
+	}
+	return r.name(base) + "[" + extra + "]"
 }
 
 func join(parts []string, sep string) string {

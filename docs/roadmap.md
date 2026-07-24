@@ -43,12 +43,15 @@ extra configuration.
 
 ## Fuller resolution scope
 
-- Expand a package's requested extras into their dependencies during resolution.
+Expanding extras is **done**. `flask[async]` resolves to flask plus what its
+async extra requires, the selected extras are recorded in `gpt.lock`, and
+install hands them to pip.
+
 - Resolve direct URL, version control, and local path requirements, not just
   index packages.
 
-Done when a requirements file that uses extras and a direct reference resolves to
-a complete, correct lock.
+Done when a requirements file using a direct reference resolves to a complete,
+correct lock.
 
 ## Cross-environment locks
 

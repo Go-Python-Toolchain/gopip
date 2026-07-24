@@ -39,8 +39,6 @@ the meaning of the existing ones.
 gopip resolves the dependency graph from the requirements you give it, evaluated
 against a target environment. Some things are out of scope today:
 
-- **Extras** are parsed in requirement strings, but the resolver does not yet
-  expand a package's optional extras into their own dependencies.
 - **Non-index requirements**, such as editable installs, direct URLs, version
   control references, and local paths, are not resolved. gopip works from the
   package index.

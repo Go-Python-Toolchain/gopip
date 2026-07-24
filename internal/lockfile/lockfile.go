@@ -25,8 +25,11 @@ type Lock struct {
 
 // Package is one locked package with the resolved packages it depends on.
 type Package struct {
-	Name         string   `json:"name"`
-	Version      string   `json:"version"`
+	Name    string `json:"name"`
+	Version string `json:"version"`
+	// Extras are the optional features of this package the resolution selected,
+	// sorted. Absent when none were, so a lock without extras is unchanged.
+	Extras       []string `json:"extras,omitempty"`
 	Dependencies []string `json:"dependencies,omitempty"`
 }
 
@@ -46,9 +49,12 @@ func Build(sol *resolve.Solution) *Lock {
 	for _, name := range names {
 		deps := append([]string(nil), sol.Edges[name]...)
 		sort.Strings(deps)
+		extras := append([]string(nil), sol.Extras[name]...)
+		sort.Strings(extras)
 		lock.Packages = append(lock.Packages, Package{
 			Name:         name,
 			Version:      sol.Packages[name].String(),
+			Extras:       extras,
 			Dependencies: deps,
 		})
 	}

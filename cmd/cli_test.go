@@ -151,3 +151,24 @@ func TestHumanBytes(t *testing.T) {
 		}
 	}
 }
+
+// What gopip hands to pip has to be what it resolved, extras included. Handing
+// over the bare package would install a different set from the one in the lock.
+func TestPinnedRequirementsCarryExtras(t *testing.T) {
+	sol := &resolve.Solution{
+		Packages: map[string]*pyver.Version{
+			"flask":   pyver.MustParse("3.1.3"),
+			"asgiref": pyver.MustParse("3.12.1"),
+			"uvicorn": pyver.MustParse("0.51.0"),
+		},
+		Extras: map[string][]string{
+			"flask":   {"async"},
+			"uvicorn": {"standard", "extra"},
+		},
+	}
+	got := pinnedRequirements(sol)
+	want := []string{"asgiref==3.12.1", "flask[async]==3.1.3", "uvicorn[extra,standard]==0.51.0"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+}
