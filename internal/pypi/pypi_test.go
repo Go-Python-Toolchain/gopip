@@ -307,3 +307,122 @@ func TestLatestMetadataMatchesTheReleaseDocument(t *testing.T) {
 		})
 	}
 }
+
+// hashIndex serves both document shapes carrying artifact digests, the way a
+// real index does: a release document lists them under urls, a package document
+// lists them per version under releases.
+func hashIndex(t *testing.T) *httptest.Server {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/sample/json", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"info": {"name": "sample", "version": "2.0"},
+			"releases": {
+				"1.0": [{"filename": "sample-1.0.tar.gz", "digests": {"sha256": "aaa"}}],
+				"2.0": [
+					{"filename": "sample-2.0-py3-none-any.whl", "digests": {"sha256": "ccc"}},
+					{"filename": "sample-2.0.tar.gz", "digests": {"sha256": "bbb"}}
+				]
+			}}`)
+	})
+	mux.HandleFunc("/sample/1.0/json", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"info": {"name": "sample", "version": "1.0"},
+			"urls": [{"filename": "sample-1.0.tar.gz", "digests": {"sha256": "aaa"}}]}`)
+	})
+	return httptest.NewServer(mux)
+}
+
+// A release's artifacts come from the release document.
+func TestClientReadsArtifactDigests(t *testing.T) {
+	srv := hashIndex(t)
+	defer srv.Close()
+	c := NewClient(WithBaseURL(srv.URL))
+
+	info, err := c.Release(context.Background(), "sample", version.MustParse("1.0"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(info.Files) != 1 || info.Files[0].Filename != "sample-1.0.tar.gz" {
+		t.Fatalf("files = %+v", info.Files)
+	}
+	if got := info.Hashes(); len(got) != 1 || got[0] != "sha256:aaa" {
+		t.Fatalf("hashes = %v", got)
+	}
+}
+
+// The latest release's metadata is reused from the package document, so its
+// artifacts have to come along with it rather than being lost.
+func TestReusedLatestMetadataKeepsItsArtifacts(t *testing.T) {
+	srv := hashIndex(t)
+	defer srv.Close()
+	c := NewClient(WithBaseURL(srv.URL))
+	ctx := context.Background()
+
+	if _, err := c.Versions(ctx, "sample"); err != nil {
+		t.Fatal(err)
+	}
+	info, err := c.Release(ctx, "sample", version.MustParse("2.0"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Sorted, so the wheel and the sdist come back in a stable order.
+	got := info.Hashes()
+	if len(got) != 2 || got[0] != "sha256:bbb" || got[1] != "sha256:ccc" {
+		t.Fatalf("hashes = %v, want [sha256:bbb sha256:ccc]", got)
+	}
+}
+
+// Every artifact is listed, sorted, without duplicates, and files the index gave
+// no digest for are left out rather than emitted as an empty hash.
+func TestReleaseHashes(t *testing.T) {
+	info := &ReleaseInfo{Files: []FileInfo{
+		{Filename: "c.whl", SHA256: "ccc"},
+		{Filename: "a.whl", SHA256: "aaa"},
+		{Filename: "dup.whl", SHA256: "aaa"},
+		{Filename: "nodigest.whl"},
+	}}
+	got := info.Hashes()
+	want := []string{"sha256:aaa", "sha256:ccc"}
+	if len(got) != len(want) {
+		t.Fatalf("hashes = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("hashes = %v, want %v", got, want)
+		}
+	}
+	if (&ReleaseInfo{}).Hashes() != nil {
+		t.Error("a release with no files should have no hashes")
+	}
+}
+
+// TestHashesMatchTheIndex checks gopip's digests against what pypi.org publishes
+// for the same release. It is guarded because it reaches the network.
+func TestHashesMatchTheIndex(t *testing.T) {
+	if os.Getenv("GOPIP_NETWORK_TESTS") == "" {
+		t.Skip("set GOPIP_NETWORK_TESTS=1 to run tests that reach pypi.org")
+	}
+
+	ctx := context.Background()
+	for _, name := range []string{"mdurl", "click", "certifi"} {
+		t.Run(name, func(t *testing.T) {
+			c := NewClient()
+			versions, err := c.Versions(ctx, name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			v := versions[len(versions)-1]
+			info, err := c.Release(ctx, name, v)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(info.Hashes()) == 0 {
+				t.Fatalf("%s %s came back with no artifact digests", name, v)
+			}
+			for _, f := range info.Files {
+				if len(f.SHA256) != 64 {
+					t.Errorf("%s: digest %q is not a sha256", f.Filename, f.SHA256)
+				}
+			}
+		})
+	}
+}

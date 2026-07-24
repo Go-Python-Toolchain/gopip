@@ -30,6 +30,25 @@ func (m *MemSource) Add(info *ReleaseInfo) {
 	m.releases[key][info.Version.String()] = info
 }
 
+// AddFiles attaches published artifacts to a release already recorded, so tests
+// can exercise anything that depends on a release's digests.
+func (m *MemSource) AddFiles(name, ver string, files ...FileInfo) error {
+	v, err := version.Parse(ver)
+	if err != nil {
+		return err
+	}
+	rels, ok := m.releases[requirement.CanonicalizeName(name)]
+	if !ok {
+		return ErrNotFound
+	}
+	info, ok := rels[v.String()]
+	if !ok {
+		return ErrNotFound
+	}
+	info.Files = append(info.Files, files...)
+	return nil
+}
+
 // AddPackage is a convenience for registering a release from strings.
 func (m *MemSource) AddPackage(name, ver string, deps ...string) error {
 	v, err := version.Parse(ver)

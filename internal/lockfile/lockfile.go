@@ -29,7 +29,10 @@ type Package struct {
 	Version string `json:"version"`
 	// Extras are the optional features of this package the resolution selected,
 	// sorted. Absent when none were, so a lock without extras is unchanged.
-	Extras       []string `json:"extras,omitempty"`
+	Extras []string `json:"extras,omitempty"`
+	// Hashes are the digests of the artifacts published for this version, in
+	// pip's hash syntax, sorted. Absent when the index published none.
+	Hashes       []string `json:"hashes,omitempty"`
 	Dependencies []string `json:"dependencies,omitempty"`
 }
 
@@ -51,10 +54,13 @@ func Build(sol *resolve.Solution) *Lock {
 		sort.Strings(deps)
 		extras := append([]string(nil), sol.Extras[name]...)
 		sort.Strings(extras)
+		hashes := append([]string(nil), sol.Hashes[name]...)
+		sort.Strings(hashes)
 		lock.Packages = append(lock.Packages, Package{
 			Name:         name,
 			Version:      sol.Packages[name].String(),
 			Extras:       extras,
+			Hashes:       hashes,
 			Dependencies: deps,
 		})
 	}

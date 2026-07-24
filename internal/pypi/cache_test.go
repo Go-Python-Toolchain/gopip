@@ -363,3 +363,48 @@ func TestCachedSourceIsConcurrencySafe(t *testing.T) {
 		}
 	}
 }
+
+// Artifact digests are what a hash-verified install rests on, so they have to
+// come back out of the cache exactly as they went in.
+func TestCachedSourceRoundTripsArtifactDigests(t *testing.T) {
+	dir := t.TempDir()
+	inner := &filesSource{}
+	ctx := context.Background()
+	v := version.MustParse("2.0")
+
+	if _, err := NewCachedSource(inner, dir).Release(ctx, "sample", v); err != nil {
+		t.Fatal(err)
+	}
+	got, err := NewCachedSource(inner, dir).Release(ctx, "sample", v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Files) != 2 {
+		t.Fatalf("files = %+v", got.Files)
+	}
+	hashes := got.Hashes()
+	if len(hashes) != 2 || hashes[0] != "sha256:aaa" || hashes[1] != "sha256:bbb" {
+		t.Fatalf("hashes = %v", hashes)
+	}
+	if got.Files[0].Filename == "" {
+		t.Error("filenames were lost")
+	}
+}
+
+// filesSource is an index whose releases carry artifacts.
+type filesSource struct{}
+
+func (filesSource) Versions(_ context.Context, _ string) ([]*version.Version, error) {
+	return []*version.Version{version.MustParse("2.0")}, nil
+}
+
+func (filesSource) Release(_ context.Context, name string, v *version.Version) (*ReleaseInfo, error) {
+	return &ReleaseInfo{
+		Name:    name,
+		Version: v,
+		Files: []FileInfo{
+			{Filename: "sample-2.0-py3-none-any.whl", SHA256: "aaa"},
+			{Filename: "sample-2.0.tar.gz", SHA256: "bbb"},
+		},
+	}, nil
+}

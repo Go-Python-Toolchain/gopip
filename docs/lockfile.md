@@ -62,6 +62,7 @@ Each entry in `packages` is:
 | `name` | string | The package's normalized name. |
 | `version` | string | The exact resolved version, a PEP 440 version. |
 | `extras` | array of strings, optional | The package's optional features the resolution selected, normalized and sorted. Omitted when none were, so a lock for a project that uses no extras is unaffected by this field existing. |
+| `hashes` | array of strings, optional | The digests of every artifact published for this version, each written as `sha256:<hex>`, sorted. Omitted when the index published none. |
 | `dependencies` | array of strings, optional | The names of the resolved packages this one depends on, sorted. Omitted when empty. |
 
 A package with extras appears once, with the extras it was resolved with:
@@ -88,6 +89,25 @@ A package with extras appears once, with the extras it was resolved with:
 The extra's own requirements are entries in `packages` like any other, and they
 appear in the package's `dependencies`, so the graph the file records is the one
 that will actually be installed.
+
+### Hashes
+
+A release is usually published as several artifacts: a source distribution and
+one wheel per platform. `hashes` lists all of them, not only the one the machine
+that produced the lock would install, so the same lock verifies on Linux, macOS,
+and Windows. An install checks the artifact it actually downloads against the
+list and fails if none of them match.
+
+```json
+{
+  "name": "mdurl",
+  "version": "0.1.2",
+  "hashes": [
+    "sha256:84008a41e51615a49fc9966191ff91509e3c40b939176e643fd50a5c2196b8f8",
+    "sha256:bb413d29f5eea38f31dd4754dd7377d4465116fb207585f97bf925588687c1ba"
+  ]
+}
+```
 
 The `dependencies` lists reference other entries in `packages` by name, so the
 file records the full resolved graph, not just a flat list of pins. `explain`

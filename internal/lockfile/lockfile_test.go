@@ -214,3 +214,44 @@ func TestParseAcceptsALockWithoutExtras(t *testing.T) {
 		t.Errorf("extras = %v, want none", lock.Packages[0].Extras)
 	}
 }
+
+// A lock records the artifact digests of each pinned version, so it pins what
+// will be installed rather than only which version.
+func TestBuildRecordsHashes(t *testing.T) {
+	sol := &resolve.Solution{
+		Packages: map[string]*version.Version{"mdurl": version.MustParse("0.1.2")},
+		Roots:    []string{"mdurl"},
+		Hashes:   map[string][]string{"mdurl": {"sha256:bbb", "sha256:aaa"}},
+	}
+
+	lock := Build(sol)
+	got := lock.Packages[0].Hashes
+	if len(got) != 2 || got[0] != "sha256:aaa" || got[1] != "sha256:bbb" {
+		t.Fatalf("hashes = %v, want them sorted", got)
+	}
+
+	data, err := lock.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), `"hashes"`) {
+		t.Fatalf("hashes are missing from the file:\n%s", data)
+	}
+}
+
+// An index that publishes no digests for a release leaves the field out
+// entirely, rather than writing an empty list that reads like a claim.
+func TestLockOmitsAbsentHashes(t *testing.T) {
+	sol := &resolve.Solution{
+		Packages: map[string]*version.Version{"mdurl": version.MustParse("0.1.2")},
+		Roots:    []string{"mdurl"},
+	}
+
+	data, err := Build(sol).Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "hashes") {
+		t.Fatalf("a lock with no digests mentions them:\n%s", data)
+	}
+}

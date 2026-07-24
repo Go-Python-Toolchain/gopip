@@ -35,11 +35,9 @@ never be needed. That trade is worth measuring before it is worth building.
 
 ## Hashes in the lockfile
 
-- Record artifact hashes in `gpt.lock` alongside each pinned version, and have
-  `install` pass them to pip for hash-verified installs.
-
-Done when a locked project can be installed with hash checking enabled and no
-extra configuration.
+**Done.** `gpt.lock` records the digests of every artifact published for each
+pinned version, and `gopip install --require-hashes` verifies each download
+against them.
 
 ## Fuller resolution scope
 

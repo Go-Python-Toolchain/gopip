@@ -35,6 +35,41 @@ type ReleaseInfo struct {
 	RequiresPython string
 	RequiresDist   []*requirement.Requirement
 	Yanked         bool
+	// Files are the artifacts published for this release, one per wheel or
+	// source distribution. A release usually has several, because a wheel is
+	// built per platform, and any of them may be the one that gets installed.
+	Files []FileInfo
+}
+
+// FileInfo identifies one published artifact of a release by its name and the
+// digest the index publishes for it.
+type FileInfo struct {
+	Filename string
+	SHA256   string
+}
+
+// Hashes returns the release's artifact digests in pip's hash syntax, sorted and
+// without duplicates. Every artifact is listed because which one gets installed
+// depends on the machine doing the installing.
+func (r *ReleaseInfo) Hashes() []string {
+	if len(r.Files) == 0 {
+		return nil
+	}
+	seen := map[string]bool{}
+	out := make([]string, 0, len(r.Files))
+	for _, f := range r.Files {
+		if f.SHA256 == "" {
+			continue
+		}
+		h := "sha256:" + f.SHA256
+		if seen[h] {
+			continue
+		}
+		seen[h] = true
+		out = append(out, h)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // Source provides package versions and release metadata.
@@ -182,7 +217,29 @@ type packageDocument struct {
 		RequiresDist   []string `json:"requires_dist"`
 		Yanked         bool     `json:"yanked"`
 	} `json:"info"`
+	// URLs lists a release document's artifacts. A package document carries the
+	// same shape per version under Releases instead.
+	URLs     []fileDocument             `json:"urls"`
 	Releases map[string]json.RawMessage `json:"releases"`
+}
+
+// fileDocument is one published artifact as the index describes it.
+type fileDocument struct {
+	Filename string `json:"filename"`
+	Digests  struct {
+		SHA256 string `json:"sha256"`
+	} `json:"digests"`
+}
+
+func filesFrom(docs []fileDocument) []FileInfo {
+	if len(docs) == 0 {
+		return nil
+	}
+	out := make([]FileInfo, 0, len(docs))
+	for _, d := range docs {
+		out = append(out, FileInfo{Filename: d.Filename, SHA256: d.Digests.SHA256})
+	}
+	return out
 }
 
 // releaseInfo turns an info block into release metadata for a known version.
@@ -203,6 +260,7 @@ func (d *packageDocument) releaseInfo(name string, v *version.Version) *ReleaseI
 		}
 		info.RequiresDist = append(info.RequiresDist, req)
 	}
+	info.Files = filesFrom(d.URLs)
 	return info
 }
 
@@ -233,8 +291,17 @@ func (c *Client) Versions(ctx context.Context, name string) ([]*version.Version,
 	})
 
 	if latest, err := version.Parse(doc.Info.Version); err == nil {
+		info := doc.releaseInfo(name, latest)
+		// A package document lists every version's artifacts, so the latest
+		// release's files are here too, under the version string the index used.
+		if raw, ok := doc.Releases[doc.Info.Version]; ok {
+			var files []fileDocument
+			if err := json.Unmarshal(raw, &files); err == nil {
+				info.Files = filesFrom(files)
+			}
+		}
 		c.mu.Lock()
-		c.latest[requirement.CanonicalizeName(name)] = doc.releaseInfo(name, latest)
+		c.latest[requirement.CanonicalizeName(name)] = info
 		c.mu.Unlock()
 	}
 	return versions, nil

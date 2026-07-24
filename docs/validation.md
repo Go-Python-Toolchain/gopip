@@ -83,6 +83,35 @@ look like a decision and would really be a network error. A cancelled context
 aborts a resolve from inside version selection, not only from the version
 listing before it.
 
+## Artifact digests
+
+`gpt.lock` records the digests of every artifact published for each pinned
+version, so an install can check that what it downloaded is what was locked.
+Three things are checked.
+
+That the digests are real: a guarded network test compares what gopip records
+against what pypi.org publishes for the same releases. That they survive the
+route from the index into a lockfile: offline tests cover parsing them from both
+document shapes the index uses, keeping them when the latest release's metadata
+is reused rather than refetched, storing and reloading them from the cache, and
+rendering them into the requirements file pip reads.
+
+That verification actually happens: a real install of rich into a fresh virtual
+environment with `--require-hashes` succeeds, and the same install with the
+digests altered is refused by pip with a hash mismatch. The second half matters
+more than the first, since an install that verifies nothing also succeeds.
+
+One detail worth stating, because it surfaced while checking this: altering only
+the wheel's digest does not fail the install. Every artifact of a release is
+listed, including the source distribution, and pip installs whichever one
+matches. That is the intended behavior, and it is what lets a single lock verify
+on Linux, macOS, and Windows.
+
+The frozen index snapshot deliberately does not carry artifact digests. It would
+roughly triple the fixture, and digests are metadata attached to a version rather
+than a resolution decision, so including them would add churn to the reference
+locks without adding coverage of what those locks exist to protect.
+
 ## Live index
 
 Resolution is also exercised against the live index for popular packages

@@ -71,6 +71,10 @@ The lockfile is sorted and contains nothing about your machine, so running the
 same command on another operating system produces a byte-identical file. Commit
 `gpt.lock` to your repository so everyone resolves to the same versions.
 
+Each package also carries a `hashes` list, the digests of every artifact
+published for that version. They are left out of the excerpt below to keep it
+readable, and step 8 puts them to use.
+
 ```json
 {
   "version": 1,
@@ -173,6 +177,23 @@ gopip cache clear
 The cache only decides whether an answer needed the network. It can never change
 which versions you get, so a cached resolve and a fresh one produce the same
 lockfile.
+
+## 8. Verify what you install
+
+A lockfile pins which version of each package to install. `gpt.lock` also
+records the digest of every artifact published for that version, so an install
+can check that what it downloaded is what was locked:
+
+```
+gopip install --require-hashes -r requirements.txt
+```
+
+Every download is verified against the digests the index published. If any of
+them does not match, the install fails rather than proceeding, which is what
+makes it worth doing.
+
+All of a release's artifacts are recorded, not only the one your machine would
+install, so the same lock verifies on Linux, macOS, and Windows.
 
 ## Where to go next
 

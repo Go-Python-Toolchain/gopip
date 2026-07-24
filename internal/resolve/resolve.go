@@ -59,6 +59,10 @@ type Solution struct {
 	// Extras records, per package, the extras the resolution selected, sorted.
 	// A package with no extras selected has no entry.
 	Extras map[string][]string
+	// Hashes records, per package, the digests of the artifacts published for the
+	// resolved version, sorted. Every artifact is listed because which one gets
+	// installed depends on the machine doing the installing.
+	Hashes map[string][]string
 }
 
 // ResolutionError reports that no set of versions satisfies the requirements.
@@ -196,6 +200,7 @@ func (r *Resolver) Resolve(ctx context.Context, roots []*requirement.Requirement
 		Packages: map[string]*version.Version{},
 		Edges:    map[string][]string{},
 		Extras:   map[string][]string{},
+		Hashes:   map[string][]string{},
 	}
 	// A decision on an extra is not a package to install; it says that an extra of
 	// a package was selected, and the base package carries its own decision at the
@@ -226,9 +231,9 @@ func (r *Resolver) Resolve(ctx context.Context, roots []*requirement.Requirement
 	}
 	sol.Roots = sortedUnique(sol.Roots)
 
-	// Build dependency edges between resolved packages so the lockfile and the
-	// explain tree can show the graph.
-	if err := r.buildEdges(ctx, sol); err != nil {
+	// Fill in the resolved graph and each package's artifact digests, so the
+	// lockfile and the explain tree can show them.
+	if err := r.buildGraph(ctx, sol); err != nil {
 		return nil, err
 	}
 	return sol, nil
@@ -324,13 +329,18 @@ func environmentsFor(env requirement.Environment, extras []string) []requirement
 	return out
 }
 
-// buildEdges fills sol.Edges with, for each resolved package, the resolved
-// packages it depends on under the current environment.
-func (r *Resolver) buildEdges(ctx context.Context, sol *Solution) error {
+// buildGraph fills in, for each resolved package, the resolved packages it
+// depends on under the current environment and the digests of the artifacts
+// published for the version chosen. Both come from release metadata the resolve
+// has already read, so this costs nothing extra.
+func (r *Resolver) buildGraph(ctx context.Context, sol *Solution) error {
 	for pkg, v := range sol.Packages {
 		info, err := r.release(ctx, pkg, v)
 		if err != nil {
 			return err
+		}
+		if hashes := info.Hashes(); len(hashes) > 0 {
+			sol.Hashes[pkg] = hashes
 		}
 		var deps []string
 		for _, env := range environmentsFor(r.env, sol.Extras[pkg]) {

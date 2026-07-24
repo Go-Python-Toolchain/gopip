@@ -202,6 +202,38 @@ func resolveInputs(ctx context.Context, o resolveOptions) (*resolve.Solution, er
 	return r.Resolve(ctx, reqs)
 }
 
+// hashedRequirements renders the resolution as the body of a requirements file
+// with pip hash options, which is the only form pip accepts hashes in. Every
+// artifact of a release is listed, because which one gets installed depends on
+// the machine doing the installing.
+//
+// A package the index published no digests for is an error rather than a line
+// without hashes. pip would refuse the whole file anyway, and saying which
+// package is missing them is more use than pip's version of that complaint.
+func hashedRequirements(sol *resolve.Solution) (string, error) {
+	var b strings.Builder
+	for _, pinned := range pinnedRequirements(sol) {
+		name := pinned
+		if i := strings.Index(pinned, "["); i >= 0 {
+			name = pinned[:i]
+		} else if i := strings.Index(pinned, "=="); i >= 0 {
+			name = pinned[:i]
+		}
+
+		hashes := sol.Hashes[name]
+		if len(hashes) == 0 {
+			return "", fmt.Errorf("cannot verify hashes: the index published no artifact digests for %s", name)
+		}
+		b.WriteString(pinned)
+		for _, h := range hashes {
+			b.WriteString(" \\\n    --hash=")
+			b.WriteString(h)
+		}
+		b.WriteString("\n")
+	}
+	return b.String(), nil
+}
+
 // pinnedRequirements returns the resolved packages as sorted name==version
 // strings, the form pip consumes. A package whose extras were selected is
 // written with them, as name[extra]==version, so pip installs the same set gopip

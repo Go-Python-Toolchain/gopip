@@ -25,15 +25,6 @@ a wave removes the waiting between them. In practice this shows up as some
 projects benefiting far more than others from the parallel fetching. The
 [benchmarks](benchmarks.md) record where it currently stands.
 
-## No hashes in the lockfile
-
-`gpt.lock` records names, versions, and the dependency graph, but not artifact
-hashes. It pins what to install, not a cryptographic fingerprint of each wheel.
-That is enough for reproducible version selection, but it does not give you
-hash-verified, tamper-evident installs the way a fully hashed lock would.
-Recording hashes is a planned addition that would add fields without changing
-the meaning of the existing ones.
-
 ## Resolution scope
 
 gopip resolves the dependency graph from the requirements you give it, evaluated

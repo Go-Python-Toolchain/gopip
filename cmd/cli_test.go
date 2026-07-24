@@ -172,3 +172,52 @@ func TestPinnedRequirementsCarryExtras(t *testing.T) {
 		t.Fatalf("got %v, want %v", got, want)
 	}
 }
+
+// pip only accepts hashes inside a requirements file, so this rendering is the
+// interface between a resolution and a verified install.
+func TestHashedRequirements(t *testing.T) {
+	sol := &resolve.Solution{
+		Packages: map[string]*pyver.Version{
+			"flask": pyver.MustParse("3.1.3"),
+			"mdurl": pyver.MustParse("0.1.2"),
+		},
+		Extras: map[string][]string{"flask": {"async"}},
+		Hashes: map[string][]string{
+			"flask": {"sha256:aaa", "sha256:bbb"},
+			"mdurl": {"sha256:ccc"},
+		},
+	}
+
+	got, err := hashedRequirements(sol)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "flask[async]==3.1.3 \\\n" +
+		"    --hash=sha256:aaa \\\n" +
+		"    --hash=sha256:bbb\n" +
+		"mdurl==0.1.2 \\\n" +
+		"    --hash=sha256:ccc\n"
+	if got != want {
+		t.Fatalf("got:\n%s\nwant:\n%s", got, want)
+	}
+}
+
+// Verifying hashes is only meaningful if every package has some. Saying which
+// one does not is more use than letting pip refuse the whole file.
+func TestHashedRequirementsRefusesAPackageWithoutDigests(t *testing.T) {
+	sol := &resolve.Solution{
+		Packages: map[string]*pyver.Version{
+			"flask": pyver.MustParse("3.1.3"),
+			"mdurl": pyver.MustParse("0.1.2"),
+		},
+		Hashes: map[string][]string{"flask": {"sha256:aaa"}},
+	}
+
+	_, err := hashedRequirements(sol)
+	if err == nil {
+		t.Fatal("expected an error for the package with no digests")
+	}
+	if !strings.Contains(err.Error(), "mdurl") {
+		t.Errorf("error %q does not name the package that is missing digests", err)
+	}
+}

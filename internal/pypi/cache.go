@@ -143,11 +143,12 @@ type versionEntry struct {
 
 // releaseEntry is the stored form of one release's metadata.
 type releaseEntry struct {
-	Fetched        time.Time `json:"fetched"`
-	Name           string    `json:"name"`
-	RequiresPython string    `json:"requires_python,omitempty"`
-	RequiresDist   []string  `json:"requires_dist,omitempty"`
-	Yanked         bool      `json:"yanked,omitempty"`
+	Fetched        time.Time  `json:"fetched"`
+	Name           string     `json:"name"`
+	RequiresPython string     `json:"requires_python,omitempty"`
+	RequiresDist   []string   `json:"requires_dist,omitempty"`
+	Yanked         bool       `json:"yanked,omitempty"`
+	Files          []FileInfo `json:"files,omitempty"`
 }
 
 // Versions returns a package's versions, from the cache when fresh.
@@ -216,6 +217,7 @@ func newReleaseEntry(now time.Time, info *ReleaseInfo) releaseEntry {
 		Name:           info.Name,
 		RequiresPython: info.RequiresPython,
 		Yanked:         info.Yanked,
+		Files:          info.Files,
 	}
 	for _, d := range info.RequiresDist {
 		entry.RequiresDist = append(entry.RequiresDist, d.String())
@@ -229,6 +231,7 @@ func (e releaseEntry) info(v *version.Version) *ReleaseInfo {
 		Version:        v,
 		RequiresPython: e.RequiresPython,
 		Yanked:         e.Yanked,
+		Files:          e.Files,
 	}
 	for _, rd := range e.RequiresDist {
 		req, err := requirement.Parse(rd)
