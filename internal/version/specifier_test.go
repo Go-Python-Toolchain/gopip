@@ -132,3 +132,37 @@ func TestInvalidSpecifiers(t *testing.T) {
 		}
 	}
 }
+
+// A pin names one exact release. A range, including a wildcard, does not, which
+// is the distinction that decides whether a yanked release stays selectable.
+func TestExactVersions(t *testing.T) {
+	cases := []struct {
+		set  string
+		want []string
+	}{
+		{"==1.2.3", []string{"1.2.3"}},
+		{"===1.2.3", []string{"1.2.3"}},
+		{"==1.4.*", nil},
+		{">=1.0,<2.0", nil},
+		{"!=1.2.3", nil},
+		{"~=1.2", nil},
+		{"", nil},
+		{">=1.0,==1.5", []string{"1.5"}},
+	}
+	for _, c := range cases {
+		set, err := ParseSpecifierSet(c.set)
+		if err != nil {
+			t.Fatalf("parsing %q: %v", c.set, err)
+		}
+		got := set.ExactVersions()
+		if len(got) != len(c.want) {
+			t.Errorf("%q pinned %v, want %v", c.set, got, c.want)
+			continue
+		}
+		for i, w := range c.want {
+			if got[i].String() != w {
+				t.Errorf("%q pin %d = %s, want %s", c.set, i, got[i], w)
+			}
+		}
+	}
+}

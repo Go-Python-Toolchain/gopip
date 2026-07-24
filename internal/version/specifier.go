@@ -224,6 +224,27 @@ func (set *SpecifierSet) Contains(v *Version, allowPre bool) bool {
 	return true
 }
 
+// ExactVersions returns the versions this set pins with ==, which is how a
+// requirement names one exact release rather than a range. A wildcard such as
+// ==1.4.* names a range, so it is not a pin.
+func (set *SpecifierSet) ExactVersions() []*Version {
+	var out []*Version
+	for _, s := range set.specs {
+		switch {
+		case s.op == "==" && !s.wildcard && s.ver != nil:
+			out = append(out, s.ver)
+		case s.arbitrary:
+			// Arbitrary equality exists for version strings PEP 440 cannot parse.
+			// When the string does happen to be a version, it still names exactly
+			// one release, so it counts as a pin.
+			if v, err := Parse(s.raw); err == nil {
+				out = append(out, v)
+			}
+		}
+	}
+	return out
+}
+
 // String renders the specifier set.
 func (set *SpecifierSet) String() string {
 	parts := make([]string, len(set.specs))

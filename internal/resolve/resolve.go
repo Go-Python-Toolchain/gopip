@@ -84,6 +84,10 @@ type Resolver struct {
 	displayName  map[string]string
 	releaseCache map[string]*pypi.ReleaseInfo
 	concurrency  int
+	// pinned records the exact versions a requirement named with ==. A yanked
+	// release is withdrawn from general selection but still installable when it
+	// is asked for by name, which is what pinning does.
+	pinned map[string]map[string]bool
 }
 
 // Option configures a Resolver.
@@ -124,6 +128,7 @@ func New(source pypi.Source, opts ...Option) *Resolver {
 		displayName:  map[string]string{},
 		releaseCache: map[string]*pypi.ReleaseInfo{},
 		concurrency:  defaultConcurrency,
+		pinned:       map[string]map[string]bool{},
 	}
 	for _, o := range opts {
 		o(r)
@@ -497,7 +502,10 @@ func (r *Resolver) decide(ctx context.Context) (string, error) {
 		return pick, nil
 	}
 
-	chosen := r.bestVersion(pick, allowed)
+	chosen, err := r.bestVersion(ctx, pick, allowed)
+	if err != nil {
+		return "", err
+	}
 	if chosen == nil {
 		r.addIncompatibility(&incompatibility{
 			terms:  []term{{pkg: pick, allowed: allowed.clone()}},
@@ -514,41 +522,72 @@ func (r *Resolver) decide(ctx context.Context) (string, error) {
 	return pick, nil
 }
 
-// bestVersion returns the highest allowed version of a package that also
-// supports the target Python, or nil if none qualifies.
-func (r *Resolver) bestVersion(pkg string, allowed versionSet) *version.Version {
+// bestVersion returns the highest allowed version of a package that can
+// actually be used, or nil if none qualifies.
+//
+// A version is skipped when the target Python is outside its requires-python, or
+// when it has been yanked and no requirement named it exactly. It is skipped
+// when the index lists the version but has no metadata for it, which means the
+// release is not really there. Any other failure to read a version's metadata
+// stops the resolve: not knowing whether a version is usable is not the same as
+// knowing it is not, and quietly settling for an older version would produce a
+// lockfile that looks deliberate and is not.
+func (r *Resolver) bestVersion(ctx context.Context, pkg string, allowed versionSet) (*version.Version, error) {
 	versions := r.versionsAsc[pkg]
 	for i := len(versions) - 1; i >= 0; i-- {
 		v := versions[i]
 		if !allowed[v.String()] {
 			continue
 		}
-		ok, err := r.supportsPython(context.Background(), pkg, v)
-		if err != nil || !ok {
+
+		info, err := r.release(ctx, pkg, v)
+		if errors.Is(err, pypi.ErrNotFound) {
 			continue
 		}
-		return v
+		if err != nil {
+			return nil, fmt.Errorf("reading metadata for %s %s: %w", r.name(pkg), v, err)
+		}
+
+		if info.Yanked && !r.isPinned(pkg, v) {
+			continue
+		}
+		if !r.supportsPython(info) {
+			continue
+		}
+		return v, nil
 	}
-	return nil
+	return nil, nil
 }
 
 // supportsPython reports whether a release's requires-python admits the target.
-func (r *Resolver) supportsPython(ctx context.Context, pkg string, v *version.Version) (bool, error) {
-	if r.pyVersion == nil {
-		return true, nil
-	}
-	info, err := r.release(ctx, pkg, v)
-	if err != nil {
-		return false, err
-	}
-	if info.RequiresPython == "" {
-		return true, nil
+func (r *Resolver) supportsPython(info *pypi.ReleaseInfo) bool {
+	if r.pyVersion == nil || info.RequiresPython == "" {
+		return true
 	}
 	spec, err := version.ParseSpecifierSet(info.RequiresPython)
 	if err != nil {
-		return true, nil // tolerate a malformed constraint
+		return true // tolerate a malformed constraint
 	}
-	return spec.Contains(r.pyVersion, true), nil
+	return spec.Contains(r.pyVersion, true)
+}
+
+// notePins records the exact versions a requirement named, so a yanked release
+// that was asked for by name stays selectable.
+func (r *Resolver) notePins(pkg string, dep *requirement.Requirement) {
+	if dep.Specifier == nil {
+		return
+	}
+	for _, v := range dep.Specifier.ExactVersions() {
+		if r.pinned[pkg] == nil {
+			r.pinned[pkg] = map[string]bool{}
+		}
+		r.pinned[pkg][v.String()] = true
+	}
+}
+
+// isPinned reports whether some requirement named this exact version.
+func (r *Resolver) isPinned(pkg string, v *version.Version) bool {
+	return r.pinned[pkg][v.String()]
 }
 
 // addDependencyIncompatibilities registers the dependencies of a chosen release.
@@ -606,6 +645,7 @@ func (r *Resolver) dependencyIncompatibility(ctx context.Context, depender term,
 	if _, err := r.ensureUniverse(ctx, depPkg, dep.Name); err != nil {
 		return nil, err
 	}
+	r.notePins(depPkg, dep)
 	allowed := r.allowedFor(depPkg, dep)
 	detail := fmt.Sprintf("%s depends on %s%s", dependerName, dep.Name, specText(dep))
 	if allowed.isEmpty() {

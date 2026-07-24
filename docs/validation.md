@@ -66,6 +66,23 @@ seconds. The difference is entirely index traffic.
 The capture is reproducible: `GOPIP_CAPTURE=1` re-records the snapshot from the
 live index, and `GOPIP_RECORD_REFERENCE=1` re-records the reference locks.
 
+## Eligibility and failure
+
+The snapshot carries fifteen genuinely yanked releases, so the rules about which
+versions may be selected are checked against real data rather than a
+construction. pandas 3.0.4 is yanked and sits between two releases that are not,
+which makes it the clean case: a constraint that would otherwise land on it
+selects 3.0.3 instead, pinning it with `==` selects it, and an unconstrained
+resolve is unaffected.
+
+Failure handling is checked by injecting faults into the source. A release the
+index does not have is skipped and the resolve continues one version down. A
+transient failure reading a release stops the resolve with an error naming the
+release, rather than skipping the version and pinning an older one, which would
+look like a decision and would really be a network error. A cancelled context
+aborts a resolve from inside version selection, not only from the version
+listing before it.
+
 ## Live index
 
 Resolution is also exercised against the live index for popular packages

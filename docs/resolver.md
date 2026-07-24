@@ -27,3 +27,17 @@ One subtlety follows from using a finite universe. A dependency on any version o
 Decisions prefer the package with the fewest remaining candidates, breaking ties by name, and always take the highest allowed version. Given the same inputs the resolver produces the same result, which is what makes the lockfile reproducible.
 
 Dependency markers are evaluated against the target environment, so a dependency that only applies on a particular operating system or Python version is included only when it should be. A release whose requires-python does not admit the target interpreter is skipped during version selection.
+
+## Which versions are eligible
+
+A version has to clear three things before it can be selected.
+
+Its requires-python must admit the target interpreter, as above.
+
+It must not have been yanked, unless a requirement named it exactly. Yanking is a maintainer saying "do not pick this", so gopip does not pick it. A pin is a different statement: it names one release deliberately, and a project pinned to a release that was later yanked still has to be lockable, so an exact `==` keeps the release eligible. This is the same rule pip follows.
+
+Its metadata must be readable. If the index lists a version but has no metadata for it, the release is not really there and the resolver moves down to the next one. Anything else, a connection that drops or an index that errors, stops the resolve. The distinction matters more than it looks: not knowing whether a version is usable is not the same as knowing it is not, and treating a network failure as a reason to skip would quietly produce a lockfile that pins an older version and looks like a deliberate choice.
+
+## Cancellation
+
+Every lookup a resolve makes takes the caller's context, including the ones inside version selection, so cancelling a resolve or setting a deadline stops it promptly rather than at the next convenient point.
