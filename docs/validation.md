@@ -40,6 +40,32 @@ byte-identical gpt.lock on any machine. The random-graph check above confirms
 resolution determinism, and the lockfile package confirms that the serialized
 lock contains no host-specific content.
 
+## Frozen index snapshot
+
+Resolution is also pinned against a frozen capture of the real index. The
+snapshot in `internal/resolve/testdata/snapshot.json` records the full version
+list of every package the five benchmark projects touch, 53 packages, along with
+the release metadata of the 20 newest versions of each, 988 releases in total. It
+is real published metadata, with all its irregularities, held still.
+
+Two things follow from that. First, resolving the benchmark projects becomes
+deterministic in a way a live resolve cannot be: the same inputs give the same
+answer on any machine, on any day, with no network. The resulting lockfiles are
+committed under `internal/resolve/testdata/reference/`, and the test suite
+requires every resolve to reproduce them byte for byte. That is the gate work on
+fetching has to pass, because caching, prefetching, and concurrency are allowed
+to change how fast an answer arrives and never what the answer is. When a change
+is meant to move a pin, the references are re-recorded in the same commit so the
+diff states exactly which pins moved.
+
+Second, it gives a clean reading of where resolve time actually goes. Resolving
+all five projects against the snapshot, solver and all, takes about 0.03
+seconds. The same five against the live index take between four and fourteen
+seconds. The difference is entirely index traffic.
+
+The capture is reproducible: `GOPIP_CAPTURE=1` re-records the snapshot from the
+live index, and `GOPIP_RECORD_REFERENCE=1` re-records the reference locks.
+
 ## Live index
 
 Resolution is also exercised against the live index for popular packages

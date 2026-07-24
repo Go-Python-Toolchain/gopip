@@ -1,0 +1,63 @@
+{
+  "version": 1,
+  "roots": [
+    "numpy",
+    "pandas",
+    "scikit-learn"
+  ],
+  "packages": [
+    {
+      "name": "joblib",
+      "version": "1.5.3"
+    },
+    {
+      "name": "narwhals",
+      "version": "2.24.0"
+    },
+    {
+      "name": "numpy",
+      "version": "2.5.1"
+    },
+    {
+      "name": "pandas",
+      "version": "3.0.5",
+      "dependencies": [
+        "numpy",
+        "python-dateutil"
+      ]
+    },
+    {
+      "name": "python-dateutil",
+      "version": "2.9.0.post0",
+      "dependencies": [
+        "six"
+      ]
+    },
+    {
+      "name": "scikit-learn",
+      "version": "1.9.0",
+      "dependencies": [
+        "joblib",
+        "narwhals",
+        "numpy",
+        "scipy",
+        "threadpoolctl"
+      ]
+    },
+    {
+      "name": "scipy",
+      "version": "1.18.0",
+      "dependencies": [
+        "numpy"
+      ]
+    },
+    {
+      "name": "six",
+      "version": "1.17.0"
+    },
+    {
+      "name": "threadpoolctl",
+      "version": "3.6.0"
+    }
+  ]
+}

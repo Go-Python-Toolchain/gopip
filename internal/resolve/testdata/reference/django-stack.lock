@@ -1,0 +1,57 @@
+{
+  "version": 1,
+  "roots": [
+    "dj-database-url",
+    "django",
+    "djangorestframework",
+    "gunicorn",
+    "whitenoise"
+  ],
+  "packages": [
+    {
+      "name": "asgiref",
+      "version": "3.12.1"
+    },
+    {
+      "name": "dj-database-url",
+      "version": "3.1.2",
+      "dependencies": [
+        "django"
+      ]
+    },
+    {
+      "name": "django",
+      "version": "6.0.7",
+      "dependencies": [
+        "asgiref",
+        "sqlparse"
+      ]
+    },
+    {
+      "name": "djangorestframework",
+      "version": "3.17.1",
+      "dependencies": [
+        "django"
+      ]
+    },
+    {
+      "name": "gunicorn",
+      "version": "26.0.0",
+      "dependencies": [
+        "packaging"
+      ]
+    },
+    {
+      "name": "packaging",
+      "version": "26.2"
+    },
+    {
+      "name": "sqlparse",
+      "version": "0.5.5"
+    },
+    {
+      "name": "whitenoise",
+      "version": "6.12.0"
+    }
+  ]
+}

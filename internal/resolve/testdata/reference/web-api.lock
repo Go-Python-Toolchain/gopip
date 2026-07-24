@@ -1,0 +1,128 @@
+{
+  "version": 1,
+  "roots": [
+    "fastapi",
+    "httpx",
+    "jinja2",
+    "pydantic",
+    "uvicorn"
+  ],
+  "packages": [
+    {
+      "name": "annotated-doc",
+      "version": "0.0.4"
+    },
+    {
+      "name": "annotated-types",
+      "version": "0.8.0"
+    },
+    {
+      "name": "anyio",
+      "version": "4.14.2",
+      "dependencies": [
+        "idna",
+        "typing-extensions"
+      ]
+    },
+    {
+      "name": "certifi",
+      "version": "2026.7.22"
+    },
+    {
+      "name": "click",
+      "version": "8.4.2"
+    },
+    {
+      "name": "fastapi",
+      "version": "0.139.2",
+      "dependencies": [
+        "annotated-doc",
+        "pydantic",
+        "starlette",
+        "typing-extensions",
+        "typing-inspection"
+      ]
+    },
+    {
+      "name": "h11",
+      "version": "0.16.0"
+    },
+    {
+      "name": "httpcore",
+      "version": "1.0.9",
+      "dependencies": [
+        "certifi",
+        "h11"
+      ]
+    },
+    {
+      "name": "httpx",
+      "version": "0.28.1",
+      "dependencies": [
+        "anyio",
+        "certifi",
+        "httpcore",
+        "idna"
+      ]
+    },
+    {
+      "name": "idna",
+      "version": "3.18"
+    },
+    {
+      "name": "jinja2",
+      "version": "3.1.6",
+      "dependencies": [
+        "markupsafe"
+      ]
+    },
+    {
+      "name": "markupsafe",
+      "version": "3.0.3"
+    },
+    {
+      "name": "pydantic",
+      "version": "2.13.4",
+      "dependencies": [
+        "annotated-types",
+        "pydantic-core",
+        "typing-extensions",
+        "typing-inspection"
+      ]
+    },
+    {
+      "name": "pydantic-core",
+      "version": "2.46.4",
+      "dependencies": [
+        "typing-extensions"
+      ]
+    },
+    {
+      "name": "starlette",
+      "version": "1.3.1",
+      "dependencies": [
+        "anyio",
+        "typing-extensions"
+      ]
+    },
+    {
+      "name": "typing-extensions",
+      "version": "4.16.0"
+    },
+    {
+      "name": "typing-inspection",
+      "version": "0.4.2",
+      "dependencies": [
+        "typing-extensions"
+      ]
+    },
+    {
+      "name": "uvicorn",
+      "version": "0.51.0",
+      "dependencies": [
+        "click",
+        "h11"
+      ]
+    }
+  ]
+}
