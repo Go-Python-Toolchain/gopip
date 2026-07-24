@@ -22,8 +22,9 @@ What remains is the depth of the dependency graph. A package's dependencies are
 only known once its own metadata has arrived, so a long chain of packages that
 each depend on the next is fetched in waves, and no amount of parallelism inside
 a wave removes the waiting between them. In practice this shows up as some
-projects benefiting far more than others from the parallel fetching. The
-[benchmarks](benchmarks.md) record where it currently stands.
+projects benefiting far more than others from the parallel fetching, and it is
+why a cold resolve is comparable to the fastest peer tools rather than clearly
+ahead of them. The [benchmarks](benchmarks.md) record where it stands.
 
 ## Resolution scope
 

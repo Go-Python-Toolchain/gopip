@@ -29,6 +29,11 @@ PROJECTS=(
 # Repetitions per (tool, project, phase). The reported figure is the median.
 RESOLVE_RUNS="${GOPIP_BENCH_RUNS:-5}"
 
+# Repetitions of the cold phase. Fewer than the warm phase, because every cold
+# sample re-fetches everything from the package index, but more than one:
+# a cold resolve is network bound and a single sample of it is not a measurement.
+COLD_RUNS="${GOPIP_BENCH_COLD_RUNS:-3}"
+
 # Pinned competitors. uv and pip-tools both compile a requirements file to a
 # pinned set, which is the same job gopip's resolve does, so they are the fair
 # peers. pip-tools drives pip's own resolver, so it stands in for pip.

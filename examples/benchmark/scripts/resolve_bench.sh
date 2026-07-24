@@ -7,10 +7,11 @@
 # Two phases are measured:
 #   cold  the first resolve with an empty cache (the realistic first run)
 #   warm  a repeat resolve with the cache populated
-# gopip does not keep a metadata cache today, so its cold and warm figures are
-# close by design; uv and pip-tools cache aggressively, so their warm figures
-# drop sharply. That difference is part of the result, and is called out in the
-# docs.
+# All three tools keep a metadata cache, and each tool's cache is pointed at a
+# directory under CACHE_DIR so a cold run really is cold. gopip reads its cache
+# location from the environment, which is why its command runs with
+# XDG_CACHE_HOME set: without that it would use the developer's own cache and
+# every cold measurement here would silently be a warm one.
 #
 # Absolute numbers depend heavily on the network to the package index. The
 # harness runs each measurement several times and reports the median, and
@@ -26,12 +27,13 @@ counts="$RAW_DIR/counts.csv"
 mkdir -p "$RAW_DIR/resolved"
 
 runs="$RESOLVE_RUNS"
+cold_runs="$COLD_RUNS"
 
 # --- per-tool resolve commands (resolution only, output to stdout) --------
 # Each takes a requirements file path. Caches live under CACHE_DIR so cold runs
 # can clear them.
 
-gopip_cmd()      { "$GOPIP_BIN" resolve -r "$1"; }                       # no cache
+gopip_cmd()      { XDG_CACHE_HOME="$CACHE_DIR/gopip" "$GOPIP_BIN" resolve -r "$1"; }
 uv_cmd()         { "$UV_BIN" pip compile --cache-dir "$CACHE_DIR/uv" --quiet "$1"; }
 pipcompile_cmd() { PIP_CACHE_DIR="$CACHE_DIR/pip" "$PIPCOMPILE_BIN" --quiet --no-header --output-file - "$1"; }
 
@@ -39,7 +41,7 @@ clear_cache() {
   case "$1" in
     uv)         rm -rf "$CACHE_DIR/uv" ;;
     pip-compile) rm -rf "$CACHE_DIR/pip" ;;
-    gopip)      : ;;  # no cache to clear
+    gopip)      rm -rf "$CACHE_DIR/gopip" ;;
   esac
 }
 
@@ -80,18 +82,23 @@ for project in "${PROJECTS[@]}"; do
     # Verify it produces a set, and record the package count.
     capture_and_count "$tool" "$project" "$req"
 
-    # Cold: clear the tool's cache, resolve once.
-    clear_cache "$tool"
-    case "$tool" in
-      gopip)       time_run "$csv" "cold,$tool,$project" -- $(cap) "$GOPIP_BIN" resolve -r "$req" ;;
-      uv)          time_run "$csv" "cold,$tool,$project" -- $(cap) "$UV_BIN" pip compile --cache-dir "$CACHE_DIR/uv" --quiet "$req" ;;
-      pip-compile) time_run "$csv" "cold,$tool,$project" -- $(cap) env PIP_CACHE_DIR="$CACHE_DIR/pip" "$PIPCOMPILE_BIN" --quiet --no-header --output-file - "$req" ;;
-    esac
+    # Cold: clear the tool's cache before each sample, so every one of them is
+    # a genuine first run. A cold resolve is dominated by round-trips to the
+    # index, which vary far more than local work does, so it is sampled several
+    # times rather than once and reported as the median.
+    for _ in $(seq 1 "$cold_runs"); do
+      clear_cache "$tool"
+      case "$tool" in
+        gopip)       time_run "$csv" "cold,$tool,$project" -- $(cap) env XDG_CACHE_HOME="$CACHE_DIR/gopip" "$GOPIP_BIN" resolve -r "$req" ;;
+        uv)          time_run "$csv" "cold,$tool,$project" -- $(cap) "$UV_BIN" pip compile --cache-dir "$CACHE_DIR/uv" --quiet "$req" ;;
+        pip-compile) time_run "$csv" "cold,$tool,$project" -- $(cap) env PIP_CACHE_DIR="$CACHE_DIR/pip" "$PIPCOMPILE_BIN" --quiet --no-header --output-file - "$req" ;;
+      esac
+    done
 
     # Warm: repeat with the cache populated.
     for _ in $(seq 1 "$runs"); do
       case "$tool" in
-        gopip)       time_run "$csv" "warm,$tool,$project" -- $(cap) "$GOPIP_BIN" resolve -r "$req" ;;
+        gopip)       time_run "$csv" "warm,$tool,$project" -- $(cap) env XDG_CACHE_HOME="$CACHE_DIR/gopip" "$GOPIP_BIN" resolve -r "$req" ;;
         uv)          time_run "$csv" "warm,$tool,$project" -- $(cap) "$UV_BIN" pip compile --cache-dir "$CACHE_DIR/uv" --quiet "$req" ;;
         pip-compile) time_run "$csv" "warm,$tool,$project" -- $(cap) env PIP_CACHE_DIR="$CACHE_DIR/pip" "$PIPCOMPILE_BIN" --quiet --no-header --output-file - "$req" ;;
       esac

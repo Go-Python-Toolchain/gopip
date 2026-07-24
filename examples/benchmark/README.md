@@ -17,8 +17,14 @@ This directory is the harness that produces them.
 2. **Cold resolve.** Each tool resolves a project's requirements to a pinned set
    with an empty cache, the realistic first run.
 3. **Warm resolve.** The same resolve repeated with each tool's cache populated.
-   gopip keeps no metadata cache today, so its warm figure barely moves; uv and
-   pip-tools cache aggressively.
+   All three tools cache index metadata, so this measures how much of a repeat
+   resolve each of them can answer without going back to the network.
+
+Each tool's cache is pointed at a directory under `work/caches`, which the
+harness clears before every cold sample. That includes gopip, which reads its
+cache location from the environment: without setting it, gopip would use the
+cache in your home directory and every cold measurement here would silently be a
+warm one.
 
 None of the tools installs anything here. This measures resolution only:
 requirements in, a pinned set out.
@@ -37,12 +43,12 @@ so counts can vary by a package or two. Every set is internally consistent. The
 harness records each tool's resolved set under `work/raw/resolved/` so you can
 compare them.
 
-The comparison is deliberately unflattering where gopip is weak: it shows that
-gopip's cold and warm resolves are slower than uv's, because gopip fetches
-metadata serially and does not cache it between runs. The offline throughput
-number shows that this is a fetch-strategy cost, not a solver cost. Both are the
-honest picture, and both are why concurrent fetch and a cache are the top items
-on gopip's roadmap.
+The comparison is meant to be readable in either direction. It once showed
+gopip clearly slower than uv in both phases, which is what drove the work on how
+gopip fetches; it now shows gopip ahead on warm resolves and comparable on cold
+ones. Read the cold column with care: it is network bound, and the spread
+between repeated samples is about as large as the difference between the tools.
+The warm column and the offline throughput number are the stable ones.
 
 ## Requirements
 
@@ -87,10 +93,15 @@ Results land in `work/raw/`:
 ## A note on network variance
 
 Resolve times against the live index depend heavily on the network between your
-machine and the package index. The harness runs each measurement several times
-and reports the median, but absolute numbers will differ between networks. The
-relative standing of the tools, and the shape of cold versus warm, are the
-durable part.
+machine and the package index. The harness repeats every measurement and reports
+the median, three times for the cold phase and five for the warm one, but
+absolute numbers will differ between networks.
+
+The cold phase is the volatile one, since every sample re-fetches everything. In
+one published run a single tool's cold figure for one project ranged from 3.6 to
+7.8 seconds across three samples, which is wider than the gap between the tools.
+Treat cold numbers as an order of magnitude rather than a ranking. Warm numbers
+are mostly local work and are far steadier.
 
 ## Projects and tuning
 

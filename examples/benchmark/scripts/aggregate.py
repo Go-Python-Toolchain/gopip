@@ -103,12 +103,14 @@ def main():
         parts.append(phase_table(
             med, "cold", "Cold resolve (empty caches)",
             "Time to resolve a requirements file to a pinned set from a cold "
-            "cache, the realistic first run. Lower is better."))
+            "cache, the realistic first run. Every sample clears the tool's "
+            "cache first. Median. Lower is better."))
         parts.append(phase_table(
             med, "warm", "Warm resolve (caches populated)",
-            "The same resolve repeated with each tool's cache warm (median). "
-            "gopip keeps no metadata cache today, so its warm figure barely "
-            "moves; uv and pip-tools cache aggressively. Lower is better."))
+            "The same resolve repeated with each tool's cache warm. All three "
+            "tools cache index metadata, so this measures how much of a repeat "
+            "resolve each of them can answer without the network. Median. "
+            "Lower is better."))
     if cnt:
         parts.append(counts_table(cnt))
     if not med:
