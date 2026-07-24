@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 
 	"github.com/Go-Python-Toolchain/gopip/internal/pypi"
@@ -38,6 +39,11 @@ type incompatibility struct {
 	terms  []term
 	kind   string // root, dependency, no-versions, unsupported-python, derived
 	detail string
+	// causes are the two incompatibilities a derived one was resolved from.
+	// Following them back reaches the plainly stated facts, each of which is a
+	// requirement someone actually wrote, which is what a failure has to be
+	// explained in terms of.
+	causes []*incompatibility
 }
 
 func (ic *incompatibility) String() string {
@@ -71,10 +77,62 @@ type ResolutionError struct {
 }
 
 func (e *ResolutionError) Error() string {
-	if e.Cause != nil && e.Cause.detail != "" {
-		return "version resolution failed: " + e.Cause.detail
+	facts := e.Explain()
+	if len(facts) == 0 {
+		return "version resolution failed: the requirements are unsatisfiable"
 	}
-	return "version resolution failed: the requirements are unsatisfiable"
+	if len(facts) == 1 {
+		return "version resolution failed: " + facts[0]
+	}
+
+	var b strings.Builder
+	b.WriteString("version resolution failed, because:\n")
+	for _, f := range facts {
+		b.WriteString("  ")
+		b.WriteString(f)
+		b.WriteString("\n")
+	}
+	b.WriteString("these requirements cannot all be satisfied at once")
+	return b.String()
+}
+
+// Explain returns the requirements that together make the resolution
+// impossible, in the order they were discovered.
+//
+// The solver reaches a contradiction through a chain of derived
+// incompatibilities, each resolved from two others. Those derivations are the
+// machinery, not the reason. Walking back to the facts that were stated rather
+// than derived, each of which is a requirement a person or a package actually
+// declared, gives the conflict in terms the reader can act on.
+func (e *ResolutionError) Explain() []string {
+	if e == nil || e.Cause == nil {
+		return nil
+	}
+
+	var facts []string
+	seenFact := map[string]bool{}
+	seenNode := map[*incompatibility]bool{}
+
+	var walk func(ic *incompatibility)
+	walk = func(ic *incompatibility) {
+		if ic == nil || seenNode[ic] {
+			return
+		}
+		seenNode[ic] = true
+
+		if len(ic.causes) == 0 {
+			if ic.detail != "" && !seenFact[ic.detail] {
+				seenFact[ic.detail] = true
+				facts = append(facts, ic.detail)
+			}
+			return
+		}
+		for _, cause := range ic.causes {
+			walk(cause)
+		}
+	}
+	walk(e.Cause)
+	return facts
 }
 
 // Resolver holds resolution state for one run.
@@ -533,7 +591,11 @@ func (r *Resolver) conflictResolution(incompat *incompatibility) (*incompatibili
 		for _, t := range merged {
 			terms = append(terms, t)
 		}
-		incompat = &incompatibility{terms: terms, kind: "derived", detail: prior.detail}
+		incompat = &incompatibility{
+			terms:  terms,
+			kind:   "derived",
+			causes: []*incompatibility{prior, incompat},
+		}
 		newlyDerived = true
 	}
 }

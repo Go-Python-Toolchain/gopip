@@ -112,6 +112,16 @@ roughly triple the fixture, and digests are metadata attached to a version rathe
 than a resolution decision, so including them would add churn to the reference
 locks without adding coverage of what those locks exist to protect.
 
+## Failure explanations
+
+A failing resolve is checked for what it says, not only that it failed. A
+conflict between a direct requirement and a dependency two levels down must name
+all three constraints, including the one inside the package's metadata that the
+reader never wrote and could not guess. The explanation must not repeat itself,
+since a derivation visits the same requirement many times, and must not leak the
+internal name of the synthetic root package. A failure that comes down to a
+single fact stays on one line.
+
 ## Live index
 
 Resolution is also exercised against the live index for popular packages

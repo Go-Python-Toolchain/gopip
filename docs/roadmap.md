@@ -69,14 +69,10 @@ Done when one command makes an environment match the lock precisely.
 
 ## Better failure explanations
 
-The PubGrub core already learns human-readable incompatibilities when resolution
-fails.
-
-- Surface them as a clear, minimal explanation of why a set of requirements
-  cannot be satisfied, naming the conflicting constraints.
-
-Done when an unsatisfiable input prints an explanation a developer can act on
-without guessing.
+**Done.** A failing resolve is reported by walking the derivation back to the
+requirements that were actually declared, so the explanation names every
+constraint involved in the conflict, including the ones inside a package's
+metadata that the reader never wrote.
 
 ## Private and mirrored indexes
 

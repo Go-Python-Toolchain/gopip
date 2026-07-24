@@ -48,6 +48,22 @@ The obvious alternative is to track a set of active extras per package and widen
 
 Extras are normalized the same way package names are, so `flask[Async]` and `flask[async]` are one extra. An extra a package does not publish resolves to the plain package, which is what pip does. The selected extras are recorded in `gpt.lock` and handed to pip as `flask[async]==3.1.3` at install time, so what gets installed is the set that was resolved.
 
+## When resolution fails
+
+A failing resolve has to say why in terms the reader can act on. The solver reaches a contradiction through a chain of derived incompatibilities, each resolved from two others, and that chain is the machinery rather than the reason. Every derivation is recorded with the two incompatibilities it came from, so the failure can be walked back to the facts that were stated rather than derived. Each of those is a requirement someone actually declared, either in the project or in a package's metadata.
+
+Asking for a version of rich that needs a recent Pygments, alongside a direct requirement for an old one, reports:
+
+```
+version resolution failed, because:
+  the root project depends on pygments <2
+  the root project depends on rich ==15.0.0
+  rich 15.0.0 depends on pygments <3.0.0,>=2.13.0
+these requirements cannot all be satisfied at once
+```
+
+The middle constraint is the one the reader never wrote and could not have guessed, and it is the one that makes the failure make sense. A failure that comes down to a single fact, such as a constraint no published version satisfies, is reported on one line instead.
+
 ## Cancellation
 
 Every lookup a resolve makes takes the caller's context, including the ones inside version selection, so cancelling a resolve or setting a deadline stops it promptly rather than at the next convenient point.
