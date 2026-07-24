@@ -7,18 +7,21 @@ that focus. Several of these are tracked as future work in the
 [roadmap](roadmap.md), and the [benchmarks](benchmarks.md) show where they
 matter.
 
-## Cold-cache resolution is network bound
+## A cold resolve fetches one package at a time
 
-This is the big one today. gopip's solver is fast: it resolves a thousand
-synthetic graphs in well under a second with no network involved. But against
-the live index it fetches release metadata one package at a time, and it keeps
-no metadata cache between runs. So the wall-clock time of a real resolve is
-dominated by sequential network round-trips, and a warm run is barely faster
-than a cold one because nothing was cached. Tools like uv, which fetch in
-parallel and cache aggressively, are faster end to end on real projects, and the
-benchmarks show that plainly. The resolver itself is not the bottleneck; the
-fetch strategy is, and fixing it (concurrent prefetch and a persistent cache) is
-the top item on the roadmap.
+gopip's solver is fast: it resolves a thousand synthetic graphs in well under a
+second with no network involved, and it resolves five real projects against a
+frozen copy of the index in about thirty milliseconds. Wall-clock time on a real
+resolve is almost entirely time spent waiting on the package index.
+
+A warm resolve no longer pays that, because gopip now keeps a metadata cache
+between runs and a second resolve of the same project does no network work at
+all. A cold resolve still does, and it still asks for one package at a time
+rather than fetching in parallel, so it is the slower half of the comparison
+against a tool like uv. The request count is already minimal, one version list
+and one release per resolved package; what remains is that those requests run in
+sequence. Fixing that is the top item on the [roadmap](roadmap.md), and the
+[benchmarks](benchmarks.md) show where it currently stands.
 
 ## No hashes in the lockfile
 

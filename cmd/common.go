@@ -14,6 +14,7 @@ import (
 	"github.com/Go-Python-Toolchain/gopip/internal/requirement"
 	"github.com/Go-Python-Toolchain/gopip/internal/resolve"
 	pyver "github.com/Go-Python-Toolchain/gopip/internal/version"
+	"github.com/spf13/pflag"
 )
 
 // resolveOptions gathers the inputs shared by the resolving commands.
@@ -22,6 +23,20 @@ type resolveOptions struct {
 	reqFiles []string // requirements files given with -r
 	python   string   // target Python version, empty means detect
 	indexURL string   // JSON index base, empty means the default or GOPIP_INDEX_URL
+	refresh  bool     // ignore cached metadata and fetch it again
+	offline  bool     // resolve from cached metadata only
+	noCache  bool     // do not read or write the cache at all
+}
+
+// addResolveFlags registers the flags every resolving command shares, so the
+// four of them cannot drift apart.
+func addResolveFlags(f *pflag.FlagSet, o *resolveOptions) {
+	f.StringArrayVarP(&o.reqFiles, "requirement", "r", nil, "requirements file to read (repeatable)")
+	f.StringVar(&o.python, "python", "", "target Python version, for example 3.12")
+	f.StringVar(&o.indexURL, "index-url", "", "JSON index base URL (default the public index or GOPIP_INDEX_URL)")
+	f.BoolVar(&o.refresh, "refresh", false, "ignore cached index metadata and fetch it again")
+	f.BoolVar(&o.offline, "offline", false, "resolve from cached index metadata only, never reaching the network")
+	f.BoolVar(&o.noCache, "no-cache", false, "neither read nor write the metadata cache")
 }
 
 // gatherRequirements collects requirements from command line arguments and from
@@ -122,6 +137,48 @@ func jsonIndexBase(flagVal string) string {
 	return strings.TrimRight(v, "/")
 }
 
+// indexSource builds the metadata source for a run: the index client, wrapped
+// in the on-disk cache unless the cache was turned off. A cache directory that
+// cannot be determined is not fatal, since resolving without a cache is still
+// correct, only slower.
+func indexSource(o resolveOptions) (pypi.Source, *pypi.CachedSource, error) {
+	base := jsonIndexBase(o.indexURL)
+
+	var clientOpts []pypi.Option
+	if base != "" {
+		clientOpts = append(clientOpts, pypi.WithBaseURL(base))
+	}
+	client := pypi.NewClient(clientOpts...)
+
+	if o.noCache {
+		if o.offline {
+			return nil, nil, fmt.Errorf("--offline needs the cache, so it cannot be used with --no-cache")
+		}
+		return client, nil, nil
+	}
+
+	root, err := pypi.CacheRoot()
+	if err != nil {
+		if o.offline {
+			return nil, nil, fmt.Errorf("--offline needs a cache directory: %w", err)
+		}
+		return client, nil, nil
+	}
+
+	mode := pypi.CacheNormal
+	switch {
+	case o.offline && o.refresh:
+		return nil, nil, fmt.Errorf("--offline and --refresh ask for opposite things")
+	case o.offline:
+		mode = pypi.CacheOffline
+	case o.refresh:
+		mode = pypi.CacheRefresh
+	}
+
+	cached := pypi.NewCachedSource(client, pypi.CacheDir(root, base), pypi.WithCacheMode(mode))
+	return cached, cached, nil
+}
+
 // resolveInputs runs the resolver over the gathered requirements.
 func resolveInputs(ctx context.Context, o resolveOptions) (*resolve.Solution, error) {
 	reqs, err := gatherRequirements(o)
@@ -136,13 +193,12 @@ func resolveInputs(ctx context.Context, o resolveOptions) (*resolve.Solution, er
 	}
 	env := requirement.CurrentEnvironment(py)
 
-	var clientOpts []pypi.Option
-	if base := jsonIndexBase(o.indexURL); base != "" {
-		clientOpts = append(clientOpts, pypi.WithBaseURL(base))
+	source, _, err := indexSource(o)
+	if err != nil {
+		return nil, err
 	}
-	client := pypi.NewClient(clientOpts...)
 
-	r := resolve.New(client, resolve.WithEnvironment(env), resolve.WithPythonVersion(pyVer))
+	r := resolve.New(source, resolve.WithEnvironment(env), resolve.WithPythonVersion(pyVer))
 	return r.Resolve(ctx, reqs)
 }
 

@@ -10,10 +10,8 @@ import (
 )
 
 var lockOpts struct {
-	reqFiles []string
-	python   string
-	indexURL string
-	output   string
+	resolveOptions
+	output string
 }
 
 var lockCmd = &cobra.Command{
@@ -23,12 +21,9 @@ var lockCmd = &cobra.Command{
 lockfile that pins every package and records the dependency graph. The same
 requirements produce a byte-identical lockfile on any machine.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		sol, err := resolveInputs(context.Background(), resolveOptions{
-			args:     args,
-			reqFiles: lockOpts.reqFiles,
-			python:   lockOpts.python,
-			indexURL: lockOpts.indexURL,
-		})
+		opts := lockOpts.resolveOptions
+		opts.args = args
+		sol, err := resolveInputs(context.Background(), opts)
 		if err != nil {
 			return err
 		}
@@ -46,9 +41,7 @@ requirements produce a byte-identical lockfile on any machine.`,
 
 func init() {
 	f := lockCmd.Flags()
-	f.StringArrayVarP(&lockOpts.reqFiles, "requirement", "r", nil, "requirements file to read (repeatable)")
-	f.StringVar(&lockOpts.python, "python", "", "target Python version, for example 3.12")
-	f.StringVar(&lockOpts.indexURL, "index-url", "", "JSON index base URL (default the public index or GOPIP_INDEX_URL)")
+	addResolveFlags(f, &lockOpts.resolveOptions)
 	f.StringVarP(&lockOpts.output, "output", "o", "gpt.lock", "path to write the lockfile")
 	rootCmd.AddCommand(lockCmd)
 }

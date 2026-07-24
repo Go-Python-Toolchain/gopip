@@ -140,6 +140,40 @@ gopip lock -r requirements.txt --python 3.9
 This matters when a dependency is only needed on certain Python versions or
 platforms, since gopip evaluates those markers against the target you choose.
 
+## 7. The second resolve is the fast one
+
+Run the same resolve twice and the difference is obvious:
+
+```
+gopip lock -r requirements.txt
+```
+
+The first run reads what it needs from the package index. The second answers
+from a local cache and does no network work at all, so it finishes in
+milliseconds. You do not have to do anything to get this; it is the default.
+
+Three flags cover the times when it is not what you want:
+
+```
+gopip lock -r requirements.txt --refresh    # fetch again, ignoring the cache
+gopip lock -r requirements.txt --offline    # use only the cache, never the network
+gopip lock -r requirements.txt --no-cache   # leave the cache out entirely
+```
+
+`--offline` is the useful one in CI or on a plane: if something is missing from
+the cache, gopip says so rather than quietly reaching for the network.
+
+To see where the cache is and what it holds:
+
+```
+gopip cache info
+gopip cache clear
+```
+
+The cache only decides whether an answer needed the network. It can never change
+which versions you get, so a cached resolve and a fresh one produce the same
+lockfile.
+
 ## Where to go next
 
 - The [example project](../examples/basic) is ready to resolve and lock.

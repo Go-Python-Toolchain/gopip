@@ -8,11 +8,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var explainOpts struct {
-	reqFiles []string
-	python   string
-	indexURL string
-}
+var explainOpts resolveOptions
 
 var explainCmd = &cobra.Command{
 	Use:   "explain [requirements...]",
@@ -20,12 +16,9 @@ var explainCmd = &cobra.Command{
 	Long: `explain resolves the requirements and prints the resolved dependency tree,
 so you can see why each package was chosen and how they relate.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		sol, err := resolveInputs(context.Background(), resolveOptions{
-			args:     args,
-			reqFiles: explainOpts.reqFiles,
-			python:   explainOpts.python,
-			indexURL: explainOpts.indexURL,
-		})
+		opts := explainOpts
+		opts.args = args
+		sol, err := resolveInputs(context.Background(), opts)
 		if err != nil {
 			return err
 		}
@@ -35,9 +28,6 @@ so you can see why each package was chosen and how they relate.`,
 }
 
 func init() {
-	f := explainCmd.Flags()
-	f.StringArrayVarP(&explainOpts.reqFiles, "requirement", "r", nil, "requirements file to read (repeatable)")
-	f.StringVar(&explainOpts.python, "python", "", "target Python version, for example 3.12")
-	f.StringVar(&explainOpts.indexURL, "index-url", "", "JSON index base URL (default the public index or GOPIP_INDEX_URL)")
+	addResolveFlags(explainCmd.Flags(), &explainOpts)
 	rootCmd.AddCommand(explainCmd)
 }

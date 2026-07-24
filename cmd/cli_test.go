@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Go-Python-Toolchain/gopip/internal/pypi"
 	"github.com/Go-Python-Toolchain/gopip/internal/resolve"
 	pyver "github.com/Go-Python-Toolchain/gopip/internal/version"
 )
@@ -86,5 +87,67 @@ func TestLoadRequirementsFileWithInclude(t *testing.T) {
 	}
 	if !names["requests"] || !names["click"] {
 		t.Fatalf("expected requests and click from the include, got %v", names)
+	}
+}
+
+// The cache flags are the one place a user can ask gopip for two opposite
+// things, so contradictions must be refused rather than silently ranked.
+func TestIndexSourceRejectsContradictoryCacheFlags(t *testing.T) {
+	cases := []struct {
+		name string
+		opts resolveOptions
+		want string
+	}{
+		{"offline with refresh", resolveOptions{offline: true, refresh: true}, "opposite"},
+		{"offline with no cache", resolveOptions{offline: true, noCache: true}, "--no-cache"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			_, _, err := indexSource(c.opts)
+			if err == nil {
+				t.Fatal("expected an error")
+			}
+			if !strings.Contains(err.Error(), c.want) {
+				t.Fatalf("error %q does not mention %q", err, c.want)
+			}
+		})
+	}
+}
+
+// Without --no-cache a resolve should be cached, and with it the cache is out
+// of the picture entirely.
+func TestIndexSourceCachesUnlessTurnedOff(t *testing.T) {
+	source, cached, err := indexSource(resolveOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cached == nil || source != pypi.Source(cached) {
+		t.Fatal("resolving should go through the cache by default")
+	}
+
+	source, cached, err = indexSource(resolveOptions{noCache: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cached != nil {
+		t.Fatal("--no-cache still built a cache")
+	}
+	if _, ok := source.(*pypi.Client); !ok {
+		t.Fatalf("--no-cache should resolve straight from the index client, got %T", source)
+	}
+}
+
+func TestHumanBytes(t *testing.T) {
+	cases := map[int64]string{
+		0:         "0 B",
+		512:       "512 B",
+		1024:      "1.0 KB",
+		69_530:    "67.9 KB",
+		5_242_880: "5.0 MB",
+	}
+	for n, want := range cases {
+		if got := humanBytes(n); got != want {
+			t.Errorf("humanBytes(%d) = %q, want %q", n, got, want)
+		}
 	}
 }

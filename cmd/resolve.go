@@ -7,11 +7,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var resolveOpts struct {
-	reqFiles []string
-	python   string
-	indexURL string
-}
+var resolveOpts resolveOptions
 
 var resolveCmd = &cobra.Command{
 	Use:   "resolve [requirements...]",
@@ -21,12 +17,9 @@ requirements and prints them as name==version lines, the form pip understands.
 
 Requirements may be given as arguments or read from files with -r.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		sol, err := resolveInputs(context.Background(), resolveOptions{
-			args:     args,
-			reqFiles: resolveOpts.reqFiles,
-			python:   resolveOpts.python,
-			indexURL: resolveOpts.indexURL,
-		})
+		opts := resolveOpts
+		opts.args = args
+		sol, err := resolveInputs(context.Background(), opts)
 		if err != nil {
 			return err
 		}
@@ -39,9 +32,6 @@ Requirements may be given as arguments or read from files with -r.`,
 }
 
 func init() {
-	f := resolveCmd.Flags()
-	f.StringArrayVarP(&resolveOpts.reqFiles, "requirement", "r", nil, "requirements file to read (repeatable)")
-	f.StringVar(&resolveOpts.python, "python", "", "target Python version, for example 3.12")
-	f.StringVar(&resolveOpts.indexURL, "index-url", "", "JSON index base URL (default the public index or GOPIP_INDEX_URL)")
+	addResolveFlags(resolveCmd.Flags(), &resolveOpts)
 	rootCmd.AddCommand(resolveCmd)
 }

@@ -6,20 +6,24 @@ is obvious. The current constraints these address are in
 [limitations](limitations.md), and the [benchmarks](benchmarks.md) are the
 scoreboard for the performance items.
 
-## Faster resolves: concurrent fetch and a cache
+## Faster resolves: concurrent fetch
 
 This is the priority. gopip's solver is fast; its wall-clock time on real
-projects is spent waiting on the package index, fetched one request at a time
-with nothing cached between runs.
+projects is spent waiting on the package index, fetched one request at a time.
 
 - Wire the index client's existing concurrent `FetchReleases` into the
   resolver's candidate exploration, so metadata for packages the resolver will
   need is fetched in parallel rather than serially.
-- Add a persistent, on-disk metadata cache keyed by package and index, so a warm
-  resolve does little or no network work.
 
-Done when a warm resolve of the benchmark projects is dominated by the solver,
-not the network, and lands in the same range as the fastest peer tools.
+Done when a cold resolve of the benchmark projects lands in the same range as
+the fastest peer tools.
+
+The other half of this, a persistent on-disk metadata cache, is **done**. gopip
+keeps what it reads from an index under the usual per-platform cache directory,
+holding version lists briefly and individual release metadata for a week, so a
+warm resolve of the benchmark projects does no network work and finishes in
+about ten milliseconds. `--refresh`, `--offline`, and `--no-cache` cover the
+cases where that is not what you want, and `gopip cache` inspects and clears it.
 
 ## Hashes in the lockfile
 

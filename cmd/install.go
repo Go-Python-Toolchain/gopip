@@ -11,9 +11,7 @@ import (
 )
 
 var installOpts struct {
-	reqFiles   []string
-	python     string
-	indexURL   string
+	resolveOptions
 	pythonExec string
 	dryRun     bool
 }
@@ -36,12 +34,9 @@ honors its own settings such as PIP_INDEX_URL during the install step.`,
 			pipExtra = args[dash:]
 		}
 
-		sol, err := resolveInputs(context.Background(), resolveOptions{
-			args:     reqArgs,
-			reqFiles: installOpts.reqFiles,
-			python:   installOpts.python,
-			indexURL: installOpts.indexURL,
-		})
+		opts := installOpts.resolveOptions
+		opts.args = reqArgs
+		sol, err := resolveInputs(context.Background(), opts)
 		if err != nil {
 			return err
 		}
@@ -77,9 +72,7 @@ func pipInstallArgs(pinned, extra []string) []string {
 
 func init() {
 	f := installCmd.Flags()
-	f.StringArrayVarP(&installOpts.reqFiles, "requirement", "r", nil, "requirements file to read (repeatable)")
-	f.StringVar(&installOpts.python, "python", "", "target Python version, for example 3.12")
-	f.StringVar(&installOpts.indexURL, "index-url", "", "JSON index base URL (default the public index or GOPIP_INDEX_URL)")
+	addResolveFlags(f, &installOpts.resolveOptions)
 	f.StringVar(&installOpts.pythonExec, "python-exec", "python3", "interpreter whose pip performs the install")
 	f.BoolVar(&installOpts.dryRun, "dry-run", false, "print the pip command instead of running it")
 	rootCmd.AddCommand(installCmd)

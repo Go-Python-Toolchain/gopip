@@ -38,9 +38,11 @@ requirements  ->  parse  ->  fetch metadata  ->  resolve  ->  lock / print / ins
 - **`internal/pypi`** fetches metadata from a JSON package index. It is a
   `Source` interface with two methods, `Versions` and `Release`, behind an HTTP
   client with connection pooling and retry with backoff. The interface is the
-  seam that keeps the resolver testable: `MemSource` is an in-memory
-  implementation used by the offline tests, and the real client talks to
-  pypi.org or any configured mirror.
+  seam that keeps the resolver testable and the cache invisible to it:
+  `MemSource` is an in-memory implementation used by the offline tests,
+  `Snapshot` is a frozen capture of the real index that pins the regression
+  tests, `CachedSource` wraps any of them with the on-disk cache, and the real
+  client talks to pypi.org or any configured mirror.
 - **`internal/resolve`** is the solver. It is a PubGrub-style, conflict-driven
   resolver over a finite version space, deterministic and able to explain a
   failure. It asks the `Source` for versions and release metadata as it explores.
@@ -69,12 +71,41 @@ thousands of synthetic graphs, while the same resolver runs against the live
 index in production. It also means a private index or a mirror is just a
 different base URL, not a different code path.
 
-Today the resolver calls `Versions` and `Release` one package at a time as it
-explores, caching within a single run but keeping nothing on disk between runs.
-That keeps the core simple, and it is the main thing standing between gopip and
-the speed of a tool like uv on a cold cache. The index client already has a
-concurrent `FetchReleases`; wiring it into the resolver's exploration is the top
-performance item on the [roadmap](roadmap.md).
+The seam is also where the cache lives, which is why the resolver contains no
+caching logic at all.
+
+## The metadata cache
+
+A resolve asks the index the same two questions over and over: which versions of
+this package exist, and what does this exact release require. `CachedSource`
+wraps any `Source` and answers them from disk when it already knows.
+
+The two questions have very different lifetimes, and the cache treats them
+differently rather than picking one compromise:
+
+- A **version list** changes whenever anyone publishes, so it is held for ten
+  minutes. A resolve that silently ignored a release published this morning
+  would be answering yesterday's question.
+- **One release's metadata** is fixed at publication, and the only part of it
+  that can change afterwards is whether it has been yanked. It is held for a
+  week.
+
+Entries are kept per index, keyed by the index URL, so a private index and the
+public one can never answer for each other. Each entry is a small JSON file
+written atomically, through a temporary file renamed into place, so a reader
+never sees a half-written entry and several resolves can share one cache. An
+entry that cannot be read or parsed is discarded and re-fetched: a cache damaged
+by a crash or a full disk costs time, never correctness.
+
+Three flags cover the cases where the default is not what you want. `--refresh`
+ignores what is stored and fetches again. `--offline` serves only what is stored
+and refuses to reach the network, so a resolve that claims to be offline really
+was. `--no-cache` leaves the cache out entirely. The `gopip cache` command shows
+where the cache is, what it holds, and clears it.
+
+Nothing in the cache can change which versions are chosen. It only decides
+whether the answer required the network, which is why the regression suite
+resolves the same projects with and without it and requires identical lockfiles.
 
 ## Install delegates to pip
 
